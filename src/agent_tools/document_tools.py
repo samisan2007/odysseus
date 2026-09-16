@@ -432,6 +432,29 @@ class CreateDocumentTool:
                     "exit_code": 1,
                 }
 
+            # Refuse a same-session duplicate instead of silently creating one.
+            # Models that lose track of edit_document mid-conversation (or get
+            # it dropped by tool-relevance filtering for a turn) fall back to
+            # "create a new one" — the visible symptom was 2-3 near-identical
+            # copies of the same report piling up. Point back at the existing
+            # doc's id so the model retries with edit_document/update_document.
+            from src.document_actions import _norm_title
+            existing = (
+                db.query(Document)
+                .filter(Document.session_id == session_id, Document.is_active == True)
+                .all()
+            )
+            dupe = next((d for d in existing if _norm_title(d.title) == _norm_title(title)), None)
+            if dupe is not None:
+                return {
+                    "error": (
+                        f"A document titled '{dupe.title}' already exists in this session "
+                        f"(id={dupe.id}). Use edit_document or update_document with that id "
+                        f"instead of creating a duplicate."
+                    ),
+                    "exit_code": 1,
+                }
+
             doc = Document(
                 id=doc_id,
                 session_id=session_id,
@@ -797,7 +820,8 @@ class ManageDocumentTool:
 
         try:
             if action == "list":
-                q = db.query(Document).filter(Document.is_active == True)
+                show_deleted = bool(args.get("deleted") or args.get("include_deleted"))
+                q = db.query(Document).filter(Document.is_active == (not show_deleted))
                 q = _owned_document_query(q, Document, owner)
                 if args.get("search"):
                     q = q.filter(Document.title.ilike(f"%{args['search']}%"))
@@ -805,7 +829,10 @@ class ManageDocumentTool:
                     q = q.filter(Document.language == args["language"])
                 docs = q.order_by(Document.updated_at.desc()).limit(args.get("limit", 50)).all()
                 if not docs:
-                    msg = "No documents found" + (f" matching '{args['search']}'" if args.get("search") else "") + "."
+                    if show_deleted:
+                        msg = "No deleted documents found" + (f" matching '{args['search']}'" if args.get("search") else "") + "."
+                    else:
+                        msg = "No documents found" + (f" matching '{args['search']}'" if args.get("search") else "") + "."
                     return {"response": msg, "documents": [], "exit_code": 0}
                 lines = []
                 items = []
@@ -818,7 +845,10 @@ class ManageDocumentTool:
                         f"- [{d.title}](#document-{d.id}) — {lang}, {size} chars, updated {_rel(ts)}{marker}"
                     )
                     items.append({"id": d.id, "title": d.title, "language": lang, "size": size})
-                header = f"Found {len(docs)} document(s), sorted most-recent first. Click a title to open:"
+                if show_deleted:
+                    header = f"Found {len(docs)} deleted document(s), sorted most-recently-deleted first. Use action='restore' with the id to bring one back:"
+                else:
+                    header = f"Found {len(docs)} document(s), sorted most-recent first. Click a title to open:"
                 return {
                     "response": header + "\n" + "\n".join(lines),
                     "documents": items,
@@ -864,21 +894,45 @@ class ManageDocumentTool:
                 }
 
             elif action == "delete":
-                doc_id = args.get("document_id") or args.get("id") or args.get("uid") or _active_document_id
-                doc = None
-                if doc_id:
-                    doc = _get_owned_document(db, Document, doc_id, owner)
+                doc_id = args.get("document_id") or args.get("id") or args.get("uid")
+                if not doc_id:
+                    # No silent "most recently updated doc" fallback here -- that
+                    # guessed wrong in practice and deleted documents the user was
+                    # actively working on, not the one they meant. The tool's own
+                    # description already promises document_id is "the only way to
+                    # delete"; require it for real instead of guessing.
+                    return {
+                        "error": "delete requires document_id — use action='list' to find it first",
+                        "exit_code": 1,
+                    }
+                doc = _get_owned_document(db, Document, doc_id, owner)
                 if not doc:
-                    # Fallback: most recently updated doc (likely what the user means)
-                    doc = _most_recent_owned_document(db, Document, owner, active_only=True)
-                if not doc:
-                    return {"error": "No document to delete", "exit_code": 1}
+                    return {"error": f"Document '{doc_id}' not found", "exit_code": 1}
                 title = doc.title
                 doc.is_active = False
                 db.commit()
                 if _active_document_id == doc.id:
                     set_active_document(None)
-                return {"response": f"Deleted document '{title}'", "exit_code": 0}
+                return {"response": f"Deleted document '{title}' (id={doc.id}) — recoverable with action='restore' document_id={doc.id}", "exit_code": 0}
+
+            elif action == "restore":
+                # Deletion is a soft is_active flip, not a real erase -- give the
+                # user (and the model, if it deletes something by mistake) a real
+                # way back instead of requiring hand-editing the database, which
+                # is how the last deletion incident had to be fixed.
+                doc_id = args.get("document_id") or args.get("id") or args.get("uid")
+                if not doc_id:
+                    return {
+                        "error": "restore requires document_id — use action='list' with deleted=true to find it",
+                        "exit_code": 1,
+                    }
+                doc = db.query(Document).filter(Document.id == doc_id, Document.is_active == False)
+                doc = _owned_document_query(doc, Document, owner).first()
+                if not doc:
+                    return {"error": f"Deleted document '{doc_id}' not found", "exit_code": 1}
+                doc.is_active = True
+                db.commit()
+                return {"response": f"Restored document '{doc.title}' (id={doc.id})", "exit_code": 0}
 
             elif action == "tidy":
                 from src.document_actions import run_document_tidy

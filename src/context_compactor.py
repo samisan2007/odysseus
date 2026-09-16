@@ -294,9 +294,26 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     # that message with a visible notice instead of dropping it; otherwise the
     # model appears to "ignore" large pastes because it never receives them.
     # Hermes-style: recent context matters more than old context.
+    #
+    # "Current user turn" means the last real `role=="user"` message onward —
+    # NOT simply the last array element. Mid agent-loop (a tool-call round in
+    # progress), the last element is a `role=="tool"` result, not the human's
+    # question. Anchoring on the literal tail let a real user message get
+    # front-trimmed away while a large tool result (e.g. a full document read)
+    # was "protected" instead — the model then genuinely had no question left
+    # in its context and reported the conversation as empty.
     PROTECT_RECENT = 10
-    current_msg = convo_msgs[-1:] if convo_msgs else []
-    prior_convo = convo_msgs[:-1] if convo_msgs else []
+    _last_user_i = -1
+    for _i in range(len(convo_msgs) - 1, -1, -1):
+        if convo_msgs[_i].get("role") == "user":
+            _last_user_i = _i
+            break
+    if _last_user_i == -1:
+        current_msg = convo_msgs[-1:] if convo_msgs else []
+        prior_convo = convo_msgs[:-1] if convo_msgs else []
+    else:
+        current_msg = convo_msgs[_last_user_i:]
+        prior_convo = convo_msgs[:_last_user_i]
     if len(prior_convo) >= PROTECT_RECENT:
         old_msgs = prior_convo[:-(PROTECT_RECENT - 1)]
         recent_msgs = prior_convo[-(PROTECT_RECENT - 1):] + current_msg

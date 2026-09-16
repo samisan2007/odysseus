@@ -606,7 +606,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "all_day": {"type": "boolean", "description": "Whether this is an all-day event"},
                     "description": {"type": "string", "description": "Event description / notes"},
                     "location": {"type": "string", "description": "Event location"},
-                    "uid": {"type": "string", "description": "Event UID (for update/delete)"},
+                    "uid": {"type": "string", "description": "Event UID (for update/delete). list_events returns recurring events as occurrences with a compound '<series-uid>::<date>' uid; pass it back as-is."},
+                    "scope": {"type": "string", "enum": ["series", "occurrence"], "description": "delete_event only, for recurring events: 'occurrence' cancels just the dated occurrence whose compound uid you pass; 'series' (default) deletes every occurrence."},
                     "calendar_href": {"type": "string", "description": "Specific calendar URL (optional; defaults to first calendar)"},
                     "calendar": {"type": "string", "description": "Filter list_events by calendar name or href"},
                     "start": {"type": "string", "description": "list_events range start (ISO datetime). Use this for month/week requests after resolving the date range; do not pass a loose query string. Prefer start; backend also accepts start_time, start_date, range_start, from, dtstart, since."},
@@ -806,15 +807,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, or run tidy cleanup.",
+            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, restore a deleted document, or run tidy cleanup. Delete is soft (recoverable) — use action='restore' with the same document_id to undo one, or list with deleted=true to find deleted documents you don't have the id for.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "delete", "tidy"]},
-                    "document_id": {"type": "string", "description": "Document ID (for delete)"},
+                    "action": {"type": "string", "enum": ["list", "delete", "restore", "tidy"]},
+                    "document_id": {"type": "string", "description": "Document ID (for delete/restore)"},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
-                    "limit": {"type": "integer", "description": "Max results (for list, default 50)"}
+                    "limit": {"type": "integer", "description": "Max results (for list, default 50)"},
+                    "deleted": {"type": "boolean", "description": "List deleted documents instead of active ones, to find one to restore"}
                 },
                 "required": ["action"]
             }

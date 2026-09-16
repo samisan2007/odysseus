@@ -69,6 +69,32 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz
 
+# CUDA toolkit (nvcc + dev libs) for compiling llama.cpp/vLLM/etc. with real
+# GPU support. The base image otherwise ships no CUDA at all -- Cookbook's
+# llama.cpp bootstrap needs an actual nvcc + libcudart/libcublas dev headers
+# to build with -DGGML_CUDA=ON. (The pip nvidia-cuda-nvcc-cuXX wheel is NOT
+# enough on its own -- it ships ptxas/nvvm for JIT/NVRTC use only, not the
+# nvcc compiler driver itself.)
+#
+# NVIDIA's repo has no debian13 (trixie) packages under that literal path
+# name mismatch — it's served at .../debian13/... and only carries the
+# CUDA 13.x line there, which is what we install. CUDA 13.x comfortably
+# covers Blackwell/sm_120 (RTX 50-series; minimum required is 12.8) and the
+# host driver only needs to be >= the toolkit version (drivers are forward
+# compatible), so this isn't pinned to any particular GPU generation.
+RUN curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb \
+       -o /tmp/cuda-keyring.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && rm -f /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       cuda-nvcc-13-3 \
+       cuda-cudart-dev-13-3 \
+       libcublas-dev-13-3 \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/cuda/bin:${PATH}" \
+    LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
 WORKDIR /app
 
 # Install Python deps first (layer cache). Optional extras (PyMuPDF AGPL, etc.)

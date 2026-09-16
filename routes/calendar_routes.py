@@ -683,6 +683,49 @@ def _occurrence_exdate_key(uid: str, ev: CalendarEvent) -> str:
     return suffix[:16]
 
 
+def _pin_yearly_rule_to_dtstart_month(rrule_str: str, dtstart) -> str:
+    """Add BYMONTH from DTSTART to a FREQ=YEARLY rule that only has BYMONTHDAY.
+
+    Google writes contact birthdays as ``FREQ=YEARLY;INTERVAL=1;BYMONTHDAY=4``
+    with no BYMONTH. RFC 5545 says values "not contained in the rule" are
+    derived from DTSTART, so for a DTSTART in July that means "July 4th every
+    year" -- which is how Google itself renders it. python-dateutil only
+    applies that derivation when NO BYxxx part is present, so with BYMONTHDAY
+    set it expands to the 4th of EVERY month: a July birthday surfaced twelve
+    times a year, including a phantom September one.
+
+    Narrow on purpose: only BYMONTHDAY. BYWEEKNO/BYYEARDAY legitimately range
+    over the whole year, and a bare BYDAY has its own (different) ambiguity.
+    """
+    if dtstart is None or not rrule_str:
+        return rrule_str
+    body = rrule_str.strip()
+    # Multi-line values carry RDATE/EXDATE lines; leave those to dateutil.
+    if "\n" in body or "\r" in body:
+        return rrule_str
+    prefix = ""
+    if body.upper().startswith("RRULE:"):
+        prefix, body = body[:6], body[6:]
+    keys = {
+        part.split("=", 1)[0].strip().upper()
+        for part in body.split(";")
+        if "=" in part
+    }
+    if not keys.issuperset({"FREQ", "BYMONTHDAY"}):
+        return rrule_str
+    if keys & {"BYMONTH", "BYWEEKNO", "BYYEARDAY"}:
+        return rrule_str
+    freq = ""
+    for part in body.split(";"):
+        name, _, value = part.partition("=")
+        if name.strip().upper() == "FREQ":
+            freq = value.strip().upper()
+            break
+    if freq != "YEARLY":
+        return rrule_str
+    return f"{prefix}{body};BYMONTH={dtstart.month}"
+
+
 def _expand_rrule(
     ev: CalendarEvent, start: datetime, end: datetime
 ) -> List[dict]:
@@ -722,6 +765,7 @@ def _expand_rrule(
         rrule_str = _re.sub(
             r"(UNTIL=\d{8}(?:T\d{6})?)Z", r"\1", rrule_str, flags=_re.IGNORECASE
         )
+    rrule_str = _pin_yearly_rule_to_dtstart_month(rrule_str, ev.dtstart)
     try:
         rule = rrulestr(rrule_str, dtstart=ev.dtstart)
     except Exception as ex:

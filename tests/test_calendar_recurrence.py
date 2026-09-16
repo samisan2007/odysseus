@@ -354,3 +354,87 @@ def test_expand_daily_rrule_large_window_is_capped_and_marked_truncated():
     assert len(results) == cal._RRULE_EXPANSION_LIMIT
     assert results[-1]["uid"] == "evt-daily-cap::2022-09-26T09:00"
     assert all(r["truncated"] is True for r in results)
+
+
+# ── FREQ=YEARLY without BYMONTH (Google contact birthdays) ─────────────
+
+def test_expand_yearly_bymonthday_without_bymonth_stays_in_dtstart_month():
+    """A July 4 birthday must not also fire on the 4th of every other month.
+
+    Google exports contact birthdays as FREQ=YEARLY;INTERVAL=1;BYMONTHDAY=4
+    with no BYMONTH. dateutil expands that to the 4th of all twelve months,
+    so the event appeared in months it never occurs in (and disagreed with
+    what Google Calendar itself displays).
+    """
+    cal = import_calendar_routes()
+    ev = _make_event(
+        dtstart=datetime(2020, 7, 4),
+        dtend=datetime(2020, 7, 5),
+        all_day=True,
+        rrule="FREQ=YEARLY;INTERVAL=1;BYMONTHDAY=4;WKST=MO",
+    )
+
+    september = cal._expand_rrule(ev, datetime(2026, 9, 1), datetime(2026, 10, 1))
+    assert september == []
+
+    july = cal._expand_rrule(ev, datetime(2026, 7, 1), datetime(2026, 8, 1))
+    assert [r["dtstart"] for r in july] == ["2026-07-04"]
+
+    whole_year = cal._expand_rrule(ev, datetime(2026, 1, 1), datetime(2027, 1, 1))
+    assert len(whole_year) == 1
+
+
+def test_expand_yearly_explicit_bymonth_is_untouched():
+    """A rule that already names its month keeps that month, not DTSTART's."""
+    cal = import_calendar_routes()
+    ev = _make_event(
+        dtstart=datetime(2020, 7, 4),
+        dtend=datetime(2020, 7, 5),
+        all_day=True,
+        rrule="FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=4",
+    )
+
+    results = cal._expand_rrule(ev, datetime(2026, 1, 1), datetime(2027, 1, 1))
+    assert [r["dtstart"] for r in results] == ["2026-03-04"]
+
+
+def test_expand_monthly_bymonthday_still_fires_every_month():
+    """The pin is YEARLY-only — MONTHLY;BYMONTHDAY must keep all 12."""
+    cal = import_calendar_routes()
+    ev = _make_event(
+        dtstart=datetime(2020, 7, 4),
+        dtend=datetime(2020, 7, 5),
+        all_day=True,
+        rrule="FREQ=MONTHLY;BYMONTHDAY=4",
+    )
+
+    results = cal._expand_rrule(ev, datetime(2026, 1, 1), datetime(2027, 1, 1))
+    assert len(results) == 12
+
+
+def test_expand_yearly_byyearday_not_pinned():
+    """BYYEARDAY ranges over the year by design and must not gain a BYMONTH."""
+    cal = import_calendar_routes()
+    ev = _make_event(
+        dtstart=datetime(2020, 7, 4),
+        dtend=datetime(2020, 7, 5),
+        all_day=True,
+        rrule="FREQ=YEARLY;BYYEARDAY=1,186",
+    )
+
+    results = cal._expand_rrule(ev, datetime(2026, 1, 1), datetime(2027, 1, 1))
+    assert len(results) == 2
+
+
+def test_pin_yearly_helper_handles_rrule_prefix_and_case():
+    cal = import_calendar_routes()
+    pin = cal._pin_yearly_rule_to_dtstart_month
+    july = datetime(2020, 7, 4)
+
+    assert pin("RRULE:FREQ=YEARLY;BYMONTHDAY=4", july) == "RRULE:FREQ=YEARLY;BYMONTHDAY=4;BYMONTH=7"
+    assert pin("freq=yearly;bymonthday=4", july) == "freq=yearly;bymonthday=4;BYMONTH=7"
+    # Untouched cases
+    assert pin("FREQ=YEARLY", july) == "FREQ=YEARLY"
+    assert pin("FREQ=WEEKLY;BYDAY=WE", july) == "FREQ=WEEKLY;BYDAY=WE"
+    assert pin("FREQ=YEARLY;BYMONTHDAY=4", None) == "FREQ=YEARLY;BYMONTHDAY=4"
+    assert pin("", july) == ""
