@@ -300,16 +300,43 @@ def to_http_exception(exc: Exception) -> HTTPException:
 
 
 def build_responses_input(messages: list[dict]) -> list[dict]:
+    """Convert internal Chat-Completions-shaped messages to Responses API input items.
+
+    A tool-using turn has two shapes the old flat-text version silently
+    dropped: an assistant message carrying `tool_calls`, and the `role="tool"`
+    result that follows it. Confirmed against a live Codex request that the
+    API wants those as their own `function_call` / `function_call_output`
+    items (not text) — without this a multi-round tool conversation loses the
+    call/result pairing and the model has no idea a tool ran.
+    """
     input_items: list[dict] = []
     for msg in messages or []:
         role = msg.get("role") or "user"
         if role == "tool":
-            role = "user"
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = "\n".join(str(p.get("text") or p.get("content") or "") for p in content if isinstance(p, dict))
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id") or "",
+                "output": "" if content is None else str(content),
+            })
+            continue
+        tool_calls = msg.get("tool_calls") or []
         content = msg.get("content")
         if isinstance(content, list):
             text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
         else:
             text = "" if content is None else str(content)
-        input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        if text:
+            input_type = "output_text" if role == "assistant" else "input_text"
+            input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            input_items.append({
+                "type": "function_call",
+                "call_id": tc.get("id") or "",
+                "name": fn.get("name") or "",
+                "arguments": fn.get("arguments") or "{}",
+            })
     return input_items
