@@ -16,6 +16,15 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      # Cookbook's native llama.cpp checkout + compiled llama-server binary.
+      # Without this, every container recreate wipes the build and the next
+      # serve has to spend several minutes recompiling from scratch before it
+      # can start.
+      - ${APP_DATA_DIR:-./data}/llama-cpp:/app/llama.cpp:z
+      # Optional: a host folder to browse/select as an agent workspace (see
+      # /api/workspace/browse). Unset by default - the container otherwise has
+      # no visibility into host paths outside the mounts above.
+      - ${APP_WORKSPACE_DIR:-./workspace}:/app/workspace:z
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.

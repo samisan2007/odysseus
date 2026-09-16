@@ -70,8 +70,14 @@ repair_tree_ownership() {
 
 repair_app_tree_ownership() {
     if [ -d /app ]; then
+        # Prune only the actual bind-mount roots (data/logs/.ssh/.cache/huggingface/
+        # .local) — NOT /app/.cache itself. /app/.cache is a plain directory that
+        # Docker auto-creates as root when it sets up the huggingface bind mount
+        # under it; pruning the whole .cache dir left it permanently root-owned,
+        # so Cookbook's llama.cpp bootstrap (running as the app user) couldn't
+        # mkdir new siblings like .cache/odysseus/llama-cpp-prebuilt under it.
         find /app -xdev \
-            \( -path /app/data -o -path /app/logs -o -path /app/.ssh -o -path /app/.cache -o -path /app/.local \) -prune \
+            \( -path /app/data -o -path /app/logs -o -path /app/.ssh -o -path /app/.cache/huggingface -o -path /app/.local -o -path /app/llama.cpp \) -prune \
             -o -not -uid "$PUID" -print0 2>/dev/null \
             | xargs -0 -r chown "$PUID:$PGID" 2>/dev/null || true
     fi
@@ -105,6 +111,12 @@ chown "$PUID:$PGID" /app/.cache 2>/dev/null || true
 # mount with its own ownership contract. Repair its mount root so new cache
 # entries are writable, but never traverse or rewrite existing model files.
 chown "$PUID:$PGID" /app/.cache/huggingface 2>/dev/null || true
+# Same reasoning for the llama.cpp checkout+build volume: it's populated
+# entirely by the app user at runtime (Cookbook's serve bootstrap already
+# runs as that user), so only the mount root itself ever needs repairing —
+# walking a full clone + compiled build tree on every boot would be wasted
+# work for no benefit.
+chown "$PUID:$PGID" /app/llama.cpp 2>/dev/null || true
 for dir in /app/data /app/logs /app/.ssh /app/.local; do
     repair_bind_mount_ownership "$dir"
 done

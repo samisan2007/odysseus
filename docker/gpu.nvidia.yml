@@ -24,7 +24,12 @@ services:
   odysseus:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # `graphics` (on top of compute+utility) is required too -- without it
+      # nvidia-container-toolkit mounts libcuda but not the Vulkan ICD, so
+      # llama.cpp's Vulkan backend (used on Linux, where ggml-org no longer
+      # ships CUDA prebuilts) reports no usable GPU and silently falls back
+      # to CPU-only inference.
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
     deploy:
       resources:
         reservations:
