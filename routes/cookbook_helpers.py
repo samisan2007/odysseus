@@ -861,18 +861,37 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('    _odysseus_arch="$(uname -m)"')
     runner_lines.append('    _odysseus_prebuilt_url=""')
     runner_lines.append('    if command -v curl >/dev/null 2>&1 && [ "$_odysseus_arch" = "x86_64" ]; then')
-    runner_lines.append('      _odysseus_pat=""')
+    runner_lines.append('      _odysseus_pats=""')
     runner_lines.append('      _odysseus_has_nv_inline() { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q "GPU "; }')
     runner_lines.append('      _odysseus_has_vk_inline() { ldconfig -p 2>/dev/null | grep -q "libvulkan\\.so" || command -v vulkaninfo >/dev/null 2>&1 || [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ]; }')
     runner_lines.append('      _odysseus_has_vkdev_inline() { ls /dev/dri/renderD* >/dev/null 2>&1 || (lspci 2>/dev/null | grep -Ei \'VGA|3D|Display\' | grep -Eiq \'AMD|ATI|Radeon\'); }')
     runner_lines.append('      if _odysseus_has_nv_inline; then')
-    runner_lines.append('        _odysseus_pat="ubuntu.*cuda"')
+    # ggml-org's Linux releases stopped shipping an "ubuntu-cuda" zip (CUDA
+    # prebuilts are Windows-only now) — keep the cuda pattern first in case
+    # that changes, but fall back to the Vulkan build, which still gets an
+    # NVIDIA GPU real acceleration without needing the CUDA toolkit at all.
+    runner_lines.append('        _odysseus_pats="ubuntu.*cuda ubuntu.*vulkan"')
     runner_lines.append('      elif _odysseus_has_vkdev_inline && _odysseus_has_vk_inline; then')
-    runner_lines.append('        _odysseus_pat="ubuntu.*vulkan"')
+    runner_lines.append('        _odysseus_pats="ubuntu.*vulkan"')
     runner_lines.append('      else')
-    runner_lines.append('        _odysseus_pat="ubuntu-x64\\\\.zip"')
+    runner_lines.append('        _odysseus_pats="ubuntu-x64\\\\.zip"')
     runner_lines.append('      fi')
-    runner_lines.append('      _odysseus_prebuilt_url="$(curl -fsSL --max-time 15 https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null | grep \'"browser_download_url"\' | cut -d\'"\' -f4 | grep -iE "$_odysseus_pat" | grep -iv "arm\\|aarch64" | head -1)"')
+    # `/releases/latest` can resolve to a version-marker release (e.g. a bare
+    # "v0.3.0" tag cut for downstream packaging) that carries no platform
+    # binaries at all — just a `nightly-tag.txt` asset pointing at the actual
+    # build release (e.g. "b10621"). Follow that indirection so the pattern
+    # match below sees the real per-OS/per-backend zips instead of coming up
+    # empty and silently falling through to a from-source build every time.
+    runner_lines.append('      _odysseus_rel_json="$(curl -fsSL --max-time 15 https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null)"')
+    runner_lines.append('      _odysseus_nightly_tag_url="$(printf %s "$_odysseus_rel_json" | grep \'"browser_download_url"\' | cut -d\'"\' -f4 | grep "nightly-tag.txt" | head -1)"')
+    runner_lines.append('      if [ -n "$_odysseus_nightly_tag_url" ]; then')
+    runner_lines.append('        _odysseus_build_tag="$(curl -fsSL --max-time 15 "$_odysseus_nightly_tag_url" 2>/dev/null | tr -d "[:space:]")"')
+    runner_lines.append('        [ -n "$_odysseus_build_tag" ] && _odysseus_rel_json="$(curl -fsSL --max-time 15 "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/$_odysseus_build_tag" 2>/dev/null)"')
+    runner_lines.append('      fi')
+    runner_lines.append('      for _odysseus_pat in $_odysseus_pats; do')
+    runner_lines.append('        _odysseus_prebuilt_url="$(printf %s "$_odysseus_rel_json" | grep \'"browser_download_url"\' | cut -d\'"\' -f4 | grep -iE "$_odysseus_pat" | grep -iv "arm\\|aarch64" | head -1)"')
+    runner_lines.append('        [ -n "$_odysseus_prebuilt_url" ] && break')
+    runner_lines.append('      done')
     runner_lines.append('    fi')
     # Accept any of unzip / bsdtar / python3 -m zipfile as the extractor.
     # python3 is essentially always present on modern Linux, so this lets
