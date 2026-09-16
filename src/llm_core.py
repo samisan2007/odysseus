@@ -1273,6 +1273,30 @@ def _chatgpt_subscription_instructions(messages: List[Dict]) -> str:
     return "You are a helpful AI assistant."
 
 
+def _chat_completions_tools_to_responses(tools: Optional[List[Dict]]) -> Optional[List[Dict]]:
+    """Convert Chat-Completions-style tool schemas to the Responses API shape.
+
+    Chat Completions nests the definition under "function"; Responses wants it
+    flattened to the top level. Confirmed against a live Codex request — the
+    nested shape is silently ignored (no tool call ever happens), the flat one
+    works.
+    """
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        fn = t.get("function") if isinstance(t, dict) and "function" in t else t
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue
+        out.append({
+            "type": "function",
+            "name": fn["name"],
+            "description": fn.get("description") or "",
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return out or None
+
+
 def _build_chatgpt_responses_payload(
     model: str,
     messages: List[Dict],
@@ -1280,6 +1304,7 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    tools: Optional[List[Dict]] = None,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input
 
@@ -1291,6 +1316,9 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
+    responses_tools = _chat_completions_tools_to_responses(tools)
+    if responses_tools:
+        payload["tools"] = responses_tools
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
     # ChatGPT Subscription Codex API does not support max_output_tokens —
@@ -2625,7 +2653,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
     else:
         target_url = _normalize_openai_chat_url(url)
         payload = {
@@ -2684,6 +2712,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         output_tokens = 0
         _responses_actual_model = ""
         _responses_model_announced = False
+        _responses_tool_calls: Dict[str, Dict] = {}
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -2733,6 +2762,18 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 yield _degenerate
                                 return
                             yield f'data: {json.dumps({"delta": delta})}\n\n'
+                    elif evt == "response.output_item.added":
+                        item = data.get("item") or {}
+                        if item.get("type") == "function_call":
+                            _responses_tool_calls[item.get("id") or item.get("call_id")] = {
+                                "id": item.get("call_id"),
+                                "name": item.get("name"),
+                                "arguments": item.get("arguments") or "",
+                            }
+                    elif evt == "response.function_call_arguments.delta":
+                        call = _responses_tool_calls.get(data.get("item_id"))
+                        if call is not None:
+                            call["arguments"] += data.get("delta") or ""
                     elif evt == "response.completed":
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
                         if isinstance(usage, dict):
@@ -2762,6 +2803,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     _responses_actual_model,
                                 )
                                 yield f'data: {json.dumps({"type": "usage", "data": normalized_usage})}\n\n'
+                        if _responses_tool_calls:
+                            calls = list(_responses_tool_calls.values())
+                            yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                         yield "data: [DONE]\n\n"
                         return
                     elif evt in ("response.failed", "error"):
