@@ -256,6 +256,28 @@ class ReadFileTool:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
+
+        from src.markitdown_runtime import is_markitdown_format, convert_to_markdown, MARKITDOWN_MISSING
+        if is_markitdown_format(path):
+            if not os.path.isfile(path):
+                return {"error": f"read_file: {path}: not found", "exit_code": 1}
+            try:
+                text = await asyncio.to_thread(convert_to_markdown, path)
+            except Exception as e:
+                return {"error": f"read_file: {path}: {e}", "exit_code": 1}
+            if text is None:
+                return {"error": f"read_file: {path}: could not extract text ({MARKITDOWN_MISSING})", "exit_code": 1}
+            if offset > 0 or limit > 0:
+                lines = text.splitlines(keepends=True)
+                start = max(offset, 1) - 1
+                selected = lines[start:start + limit] if limit > 0 else lines[start:]
+                data = "".join(selected)
+            else:
+                data = text
+            if len(data) > MAX_READ_CHARS:
+                data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
+            return {"output": data, "exit_code": 0}
+
         try:
             def _read():
                 if offset > 0 or limit > 0:
