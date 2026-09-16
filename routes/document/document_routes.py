@@ -329,6 +329,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         offset: int = Query(0, ge=0),
         limit: int = Query(20, ge=1, le=50),
         archived: bool = Query(False),
+        deleted: bool = Query(False),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
         db = SessionLocal()
@@ -343,17 +344,25 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 (Document.language.is_(None), "text"),
                 else_=Document.language,
             )
+            # Trash view shows ONLY deleted (is_active=False) docs, regardless of
+            # archived state -- deletion and archiving are independent flags, and
+            # a deleted doc that also happened to be archived should still show
+            # up here so it can be restored. Archived-vs-active is irrelevant
+            # once something is in the trash.
+            _active_cond = (Document.is_active == False) if deleted else (Document.is_active == True)
             # Archived view shows ONLY archived docs; the default view excludes
             # them (NULL = legacy rows that predate the column = not archived).
+            # Not applied in the trash view (see above).
             _arch_cond = (Document.archived == True) if archived else or_(
                 Document.archived == False, Document.archived.is_(None))
+            _extra_cond = True if deleted else _arch_cond
             # Language facet counts (owner-filtered). PDF documents are stored
             # as markdown wrappers, so group by the library display language
             # instead of the raw stored language.
             lang_q = (
                 db.query(library_language_expr, func.count(Document.id))
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == True).filter(_arch_cond)
+                .filter(_active_cond).filter(_extra_cond)
             )
             lang_q = _owner_session_filter(lang_q, user)
             lang_rows = lang_q.group_by(library_language_expr).all()
@@ -363,7 +372,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             sc_q = (
                 db.query(func.count(func.distinct(Document.session_id)))
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == True).filter(_arch_cond)
+                .filter(_active_cond).filter(_extra_cond)
             )
             sc_q = _owner_session_filter(sc_q, user)
             session_count = sc_q.scalar()
@@ -372,7 +381,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             q = (
                 db.query(Document, DbSession.name)
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == True).filter(_arch_cond)
+                .filter(_active_cond).filter(_extra_cond)
             )
             q = _owner_session_filter(q, user)
 
@@ -753,6 +762,27 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 pass
             db.commit()
             return {"status": "deleted", "id": doc_id}
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(500, str(e))
+        finally:
+            db.close()
+
+    # ---- POST /api/document/{doc_id}/undelete — undo a soft delete ----
+    @router.post("/api/document/{doc_id}/undelete")
+    async def undelete_document(request: Request, doc_id: str) -> Dict[str, Any]:
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            doc.is_active = True
+            db.commit()
+            return {"status": "restored", "id": doc_id, "title": doc.title}
         except HTTPException:
             raise
         except Exception as e:
