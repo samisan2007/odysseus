@@ -2477,15 +2477,19 @@ def setup_model_routes(model_discovery):
                 if _user and not _is_admin:
                     _last_q = owner_filter(_last_q, ModelEndpoint, _user, include_shared=False)
                 ep = _last_q.first()
+                # The saved model belonged to the missing/disabled default
+                # endpoint — don't pair it with an unrelated fallback endpoint.
+                model = ""
             if not ep:
                 return {"endpoint_id": "", "endpoint_url": "", "model": ""}
             base = _normalize_base(ep.base_url)
             chat_url = build_chat_url(base)
-            if not model and (getattr(ep, "cached_models", None) or getattr(ep, "pinned_models", None)):
+            if getattr(ep, "cached_models", None) or getattr(ep, "pinned_models", None):
                 try:
                     visible = _visible_models(ep.cached_models, getattr(ep, "hidden_models", None), getattr(ep, "pinned_models", None))
-                    if visible:
-                        model = visible[0]
+                    if visible and model not in visible:
+                        from src.endpoint_resolver import _first_chat_model
+                        model = _first_chat_model(visible) or visible[0]
                 except Exception:
                     pass
             return {"endpoint_id": ep.id, "endpoint_url": chat_url, "model": model}
