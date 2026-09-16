@@ -161,10 +161,38 @@ def _poll_device_flow(_request: Request, pending: Dict) -> DeviceFlowPoll:
 
 
 def setup_chatgpt_subscription_routes():
-    return create_device_flow_router(
+    router = create_device_flow_router(
         prefix="/api/chatgpt-subscription",
         tags=["chatgpt-subscription"],
         store=_DEVICE_FLOW_STORE,
         start_flow=_start_device_flow,
         poll_flow=_poll_device_flow,
     )
+
+    @router.get("/reasoning-levels")
+    def reasoning_levels(request: Request) -> Dict:
+        """Supported reasoning effort levels per ChatGPT Subscription model."""
+        owner = get_current_user(request) or None
+        db = SessionLocal()
+        try:
+            auth = (
+                db.query(ProviderAuthSession)
+                .filter(
+                    ProviderAuthSession.provider == chatgpt_subscription.CHATGPT_SUBSCRIPTION_PROVIDER,
+                    ProviderAuthSession.owner == owner,
+                )
+                .first()
+            )
+            auth_id = auth.id if auth else None
+        finally:
+            db.close()
+        if not auth_id:
+            return {"models": {}}
+        try:
+            token = chatgpt_subscription.resolve_runtime_credentials(auth_id, owner)["api_key"]
+        except Exception as exc:
+            logger.debug("ChatGPT reasoning levels: credentials unavailable: %s", exc)
+            return {"models": {}}
+        return {"models": chatgpt_subscription.reasoning_levels(token)}
+
+    return router

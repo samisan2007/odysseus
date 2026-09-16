@@ -2767,7 +2767,19 @@ body.bg-pattern-sparkles {
     .chat-input-bar { container-type: inline-size; container-name: chatbar; }
     @container chatbar (max-width: 340px) {
       .chat-input-right .mode-toggle { display: none !important; }
+      .chat-input-right .reasoning-effort-wrap { display: none !important; }
     }
+    .reasoning-effort-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-right: 6px;
+      font-size: 11px;
+      color: color-mix(in srgb, var(--fg) 65%, transparent);
+    }
+    .reasoning-effort-wrap[hidden] { display: none; }
+    .reasoning-effort-wrap input { width: 64px; accent-color: var(--accent, var(--red)); }
+    .reasoning-effort-wrap span { min-width: 3.5em; }
     @container chatbar (max-width: 260px) {
       #model-picker-wrap { display: none !important; }
     }

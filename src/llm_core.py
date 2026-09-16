@@ -1306,7 +1306,7 @@ def _build_chatgpt_responses_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
 ) -> Dict:
-    from src.chatgpt_subscription import build_responses_input
+    from src.chatgpt_subscription import build_responses_input, reasoning_effort_for
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
     payload: Dict = {
@@ -1321,6 +1321,9 @@ def _build_chatgpt_responses_payload(
         payload["tools"] = responses_tools
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
+    effort = reasoning_effort_for(model)
+    if effort:
+        payload["reasoning"] = {"effort": effort}
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.

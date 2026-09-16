@@ -245,7 +245,7 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260808startupshell1">
+  <link rel="stylesheet" href="/static/style.css?v=20260916reasoningeffort1">
   <link rel="modulepreload" href="/static/app.js?v=20260815toolapproval4">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260815toolapproval4">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -1196,6 +1196,11 @@
           </button>
         </div>
         <div class="chat-input-right">
+          <!-- Reasoning effort (shown only for models that advertise levels) -->
+          <label class="reasoning-effort-wrap" id="reasoning-effort-wrap" title="Reasoning effort" hidden>
+            <input type="range" id="reasoning-effort" min="0" max="0" step="1" value="0" aria-label="Reasoning effort">
+            <span id="reasoning-effort-label"></span>
+          </label>
           <!-- Agent / Chat mode toggle -->
           <div class="mode-toggle">
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>

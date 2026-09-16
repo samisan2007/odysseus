@@ -131,3 +131,22 @@ def test_chatgpt_subscription_payload_omits_max_output_tokens_when_zero():
     )
 
     assert "max_output_tokens" not in payload
+
+
+def test_chatgpt_subscription_payload_sends_supported_reasoning_effort(monkeypatch):
+    from src import chatgpt_subscription as cs
+
+    monkeypatch.setitem(cs._REASONING_LEVELS, "gpt-5.6-luna", {"levels": ["low", "medium", "max"], "default": "medium"})
+    msgs = [{"role": "user", "content": "Say OK"}]
+
+    def build():
+        return llm_core._build_chatgpt_responses_payload("gpt-5.6-luna", msgs, temperature=1, max_tokens=0)
+
+    assert "reasoning" not in build()  # nothing chosen
+    token = cs.REASONING_EFFORT.set("max")
+    try:
+        assert build()["reasoning"] == {"effort": "max"}
+        cs.REASONING_EFFORT.set("ultra")  # not supported by this model
+        assert "reasoning" not in build()
+    finally:
+        cs.REASONING_EFFORT.reset(token)
