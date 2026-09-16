@@ -22,13 +22,17 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
     from core.database import SessionLocal, CalendarCal, CalendarEvent, Note
     from routes.calendar_routes import (
         _ensure_default_calendar,
+        _expand_rrule,
+        _occurrence_exdate_key,
         _parse_dt,
         _parse_dt_pair,
         parse_due_for_user,
+        _recurrence_exdates,
         _resolve_base_uid,
         _push_caldav_event_after_commit,
         _record_caldav_delete_tombstone,
     )
+    from sqlalchemy import and_, or_
     import uuid as _uuid
 
     try:
@@ -241,10 +245,26 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if end_dt <= start_dt:
                 end_dt = start_dt + timedelta(days=1)
 
+            # Mirror GET /calendar/events: a plain overlap filter hides every
+            # recurring series whose base dtstart sits outside the window, so
+            # birthdays (FREQ=YEARLY from their original year) and long-running
+            # weekly meetings were invisible to the agent while the UI — which
+            # expands RRULEs — showed them. Fetch recurring masters starting
+            # before the window end and expand them server-side.
             q = _event_query().filter(
-                CalendarEvent.dtstart < end_dt,
-                CalendarEvent.dtend > start_dt,
                 CalendarEvent.status != "cancelled",
+                or_(
+                    and_(
+                        or_(CalendarEvent.rrule == "", CalendarEvent.rrule.is_(None)),
+                        CalendarEvent.dtstart < end_dt,
+                        CalendarEvent.dtend > start_dt,
+                    ),
+                    and_(
+                        CalendarEvent.rrule.isnot(None),
+                        CalendarEvent.rrule != "",
+                        CalendarEvent.dtstart < end_dt,
+                    ),
+                ),
             )
             calendar_filter = args.get("calendar")
             if calendar_filter:
@@ -253,22 +273,29 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                     (CalendarCal.name == calendar_filter)
                 )
             rows = q.order_by(CalendarEvent.dtstart).all()
-            events = []
+            occurrences = []
             for ev in rows:
-                if ev.all_day:
-                    s, e = ev.dtstart.strftime("%Y-%m-%d"), ev.dtend.strftime("%Y-%m-%d")
-                else:
-                    suffix = "Z" if getattr(ev, "is_utc", False) else ""
-                    s, e = ev.dtstart.isoformat() + suffix, ev.dtend.isoformat() + suffix
+                occurrences.extend(_expand_rrule(ev, start_dt, end_dt))
+            occurrences.sort(key=lambda d: d["dtstart"])
+            truncated = any(o.get("truncated") for o in occurrences)
+            events = []
+            for occ in occurrences:
                 events.append({
-                    "uid": ev.uid, "summary": ev.summary or "", "dtstart": s, "dtend": e,
-                    "all_day": ev.all_day, "description": ev.description or "",
-                    "location": ev.location or "",
-                    "calendar": ev.calendar.name if ev.calendar else "",
-                    "calendar_href": ev.calendar_id,
-                    "event_type": ev.event_type or "",
-                    "importance": ev.importance or "normal",
-                    "rrule": ev.rrule or "",
+                    # Occurrences carry a compound `{base_uid}::{date}` uid;
+                    # update/delete resolve it back via _resolve_base_uid, and
+                    # the chat anchor matches it against the loaded occurrence.
+                    "uid": occ["uid"],
+                    "series_uid": occ.get("series_uid", occ["uid"]),
+                    "is_recurrence": bool(occ.get("is_recurrence")),
+                    "summary": occ.get("summary") or "",
+                    "dtstart": occ["dtstart"], "dtend": occ.get("dtend", ""),
+                    "all_day": occ.get("all_day"), "description": occ.get("description") or "",
+                    "location": occ.get("location") or "",
+                    "calendar": occ.get("calendar") or "",
+                    "calendar_href": occ.get("calendar_href"),
+                    "event_type": occ.get("event_type") or "",
+                    "importance": occ.get("importance") or "normal",
+                    "rrule": occ.get("rrule") or "",
                 })
             if not events:
                 response_text = f"No events between {start_dt.date().isoformat()} and {end_dt.date().isoformat()}."
@@ -295,8 +322,16 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                             desc = desc[:117] + "..."
                         line += f"\n    {desc}"
                     lines.append(line)
+                if truncated:
+                    lines.append(
+                        "(Recurrence expansion hit its per-series limit - "
+                        "narrow the range for a complete list.)"
+                    )
                 response_text = "\n".join(lines)
-            return {"response": response_text, "events": events, "exit_code": 0}
+            result = {"response": response_text, "events": events, "exit_code": 0}
+            if truncated:
+                result["truncated"] = True
+            return result
 
         elif action == "create_event":
             summary = args.get("summary")
@@ -545,14 +580,42 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             ev = _event_query().filter(CalendarEvent.uid == base_uid).first()
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
+            # list_events now returns per-occurrence uids for recurring series,
+            # so "delete that birthday on the 4th" can arrive as a compound uid.
+            # Match DELETE /calendar/events/{uid}: scope=occurrence adds an
+            # EXDATE, anything else deletes the whole series.
+            scope = str(args.get("scope") or "series").strip().lower()
+            if scope in {"occurrence", "instance"} and "::" in uid and ev.rrule:
+                key = _occurrence_exdate_key(uid, ev)
+                if not key:
+                    return {"error": f"Invalid recurring occurrence uid: {uid}", "exit_code": 1}
+                exdates = _recurrence_exdates(ev)
+                if key not in exdates:
+                    exdates.append(key)
+                ev.recurrence_exdates = json.dumps(sorted(exdates))
+                is_caldav = ev.calendar and ev.calendar.source == "caldav"
+                if is_caldav:
+                    ev.caldav_sync_pending = "update"
+                db.commit()
+                if is_caldav:
+                    await _push_caldav_event_after_commit(owner, base_uid, "update")
+                return {
+                    "response": f"Deleted the {key} occurrence of {ev.summary or base_uid}; the rest of the series is unchanged.",
+                    "scope": "occurrence",
+                    "exdate": key,
+                    "exit_code": 0,
+                }
             is_caldav = ev.calendar and ev.calendar.source == "caldav" and ev.remote_href
             if is_caldav:
                 _record_caldav_delete_tombstone(db, ev, owner)
+            summary = ev.summary or base_uid
+            was_recurring = bool(ev.rrule)
             db.delete(ev)
             db.commit()
             if is_caldav:
                 await _push_caldav_event_after_commit(owner, base_uid, "delete")
-            return {"response": f"Deleted event {uid}", "exit_code": 0}
+            what = f"the whole {summary} series" if was_recurring else f"event {uid}"
+            return {"response": f"Deleted {what}", "scope": "series", "exit_code": 0}
 
         else:
             return {
