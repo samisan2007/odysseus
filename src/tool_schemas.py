@@ -246,7 +246,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "title": {"type": "string", "description": "Document title"},
                     "language": {"type": "string", "description": "Programming language or format (e.g. python, javascript, markdown, text)"},
-                    "content": {"type": "string", "description": "The document content"}
+                    "content": {"type": "string", "description": "The document content"},
+                    "folder": {"type": "string", "description": "Library folder path, e.g. Work/Notes; creates missing parents. Omit or empty string for root."}
                 },
                 "required": ["title", "content"]
             }
@@ -807,14 +808,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, restore a deleted document, or run tidy cleanup. Delete is soft (recoverable) — use action='restore' with the same document_id to undo one, or list with deleted=true to find deleted documents you don't have the id for.",
+            "description": "Manage documents and nested library folders: list_folders discovers paths; create_folder with folder creates parents; move with document_id and folder organizes a document; read opens content; list all documents (with optional search/language/folder filter), delete documents, restore a deleted document, or run tidy cleanup. Delete is soft (recoverable) — use action='restore' with the same document_id to undo one, or list with deleted=true to find deleted documents you don't have the id for.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "delete", "restore", "tidy"]},
-                    "document_id": {"type": "string", "description": "Document ID (for delete/restore)"},
+                    "action": {"type": "string", "enum": ["list", "read", "list_folders", "create_folder", "move", "delete", "restore", "tidy"]},
+                    "document_id": {"type": "string", "description": "Document ID (for read/move/delete/restore)"},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
+                    "folder": {"type": "string", "description": "Relative library path for create_folder/move or exact folder filter for list. Empty string means root; omit to list all folders."},
                     "limit": {"type": "integer", "description": "Max results (for list, default 50)"},
                     "deleted": {"type": "boolean", "description": "List deleted documents instead of active ones, to find one to restore"}
                 },
@@ -1456,7 +1458,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         if args.get("language"):
             parts.append(args["language"])
         parts.append(args.get("content", ""))
-        content = "\n".join(parts)
+        content = json.dumps(args) if "folder" in args else "\n".join(parts)
     elif tool_type == "edit_document":
         blocks = []
         edits = args.get("edits", [])

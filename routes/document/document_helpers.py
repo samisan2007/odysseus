@@ -25,6 +25,7 @@ class DocumentCreate(BaseModel):
     title: str = "Untitled"
     language: Optional[str] = None
     content: str = ""
+    folder: str = ""
 
 class DocumentUpdate(BaseModel):
     content: str
@@ -35,6 +36,7 @@ class DocumentPatch(BaseModel):
     title: Optional[str] = None
     language: Optional[str] = None
     session_id: Optional[str] = None  # link/unlink document to a session
+    folder: Optional[str] = None
 
 
 # ---- Helpers ----
@@ -45,6 +47,7 @@ def _doc_to_dict(doc: Document) -> Dict[str, Any]:
         "session_id": doc.session_id,
         "title": doc.title,
         "language": doc.language,
+        "folder": getattr(doc, "folder", "") or "",
         "current_content": doc.current_content,
         "version_count": doc.version_count,
         "is_active": doc.is_active,

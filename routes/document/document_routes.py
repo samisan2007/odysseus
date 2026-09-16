@@ -13,6 +13,7 @@ from core.database import Session as DbSession
 from src.auth_helpers import get_current_user, _auth_disabled
 from src.constants import MAIL_ATTACHMENTS_DIR
 from src.upload_handler import reserve_upload_references
+from src.document_library import validate_folder_path, create_folder, list_folders
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,41 @@ from routes.document_helpers import (
 def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     router = APIRouter(tags=["documents"])
 
+    def _folder_path(path):
+        try:
+            return validate_folder_path(path)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.get("/api/documents/folders")
+    async def get_library_folders(request: Request):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, "can_use_documents")
+        db = SessionLocal()
+        try:
+            return {"folders": list_folders(db, user)}
+        finally:
+            db.close()
+
+    @router.post("/api/documents/folders")
+    async def create_library_folder(request: Request):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, "can_use_documents")
+        try:
+            data = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "Expected a folder path") from exc
+        if not isinstance(data, dict) or "path" not in data:
+            raise HTTPException(400, "Expected a folder path")
+        path = _folder_path(data["path"])
+        db = SessionLocal()
+        try:
+            path = create_folder(db, user, path)
+            db.commit()
+            return {"path": path, "folders": list_folders(db, user)}
+        finally:
+            db.close()
+
     def _reserve_document_uploads(user: Optional[str], content: str) -> None:
         missing_id = reserve_upload_references(upload_handler, user, content)
         if missing_id:
@@ -106,6 +142,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     async def create_document(request: Request, req: DocumentCreate) -> Dict[str, Any]:
         from src.auth_helpers import require_privilege
         user = require_privilege(request, "can_use_documents")
+        folder = _folder_path(req.folder)
         db = SessionLocal()
         try:
             # session_id is optional: a doc can be a session-less "library" doc
@@ -181,6 +218,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 id=doc_id,
                 session_id=req.session_id,
                 title=req.title,
+                folder=create_folder(db, user, folder),
                 language=language,
                 current_content=req.content,
                 version_count=1,
@@ -223,6 +261,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         request: Request,
         file: UploadFile = File(...),
         session_id: Optional[str] = Form(None),
+        folder: str = Form(""),
     ) -> Dict[str, Any]:
         """Upload a PDF and create the matching Document.
 
@@ -242,6 +281,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
         from src.auth_helpers import require_privilege
         user = require_privilege(request, "can_use_documents")
+
+        folder = _folder_path(folder)
 
         # session_id is optional — a library import isn't tied to a chat. When
         # given, validate it; otherwise the PDF becomes a session-less library
@@ -313,8 +354,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             # owner filter then hides. Stamp the requesting user so it shows.
             if not doc.owner and user:
                 doc.owner = user
-                db.commit()
-                db.refresh(doc)
+            doc.folder = create_folder(db, user, folder)
+            db.commit()
+            db.refresh(doc)
             return _doc_to_dict(doc)
         finally:
             db.close()
@@ -330,8 +372,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         limit: int = Query(20, ge=1, le=50),
         archived: bool = Query(False),
         deleted: bool = Query(False),
+        folder: Optional[str] = Query(None),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
+        folder_cond = True if folder is None else func.coalesce(Document.folder, "") == _folder_path(folder)
         db = SessionLocal()
         try:
             from sqlalchemy import or_
@@ -362,7 +406,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             lang_q = (
                 db.query(library_language_expr, func.count(Document.id))
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(_active_cond).filter(_extra_cond)
+                .filter(_active_cond).filter(_extra_cond).filter(folder_cond)
             )
             lang_q = _owner_session_filter(lang_q, user)
             lang_rows = lang_q.group_by(library_language_expr).all()
@@ -372,7 +416,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             sc_q = (
                 db.query(func.count(func.distinct(Document.session_id)))
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(_active_cond).filter(_extra_cond)
+                .filter(_active_cond).filter(_extra_cond).filter(folder_cond)
             )
             sc_q = _owner_session_filter(sc_q, user)
             session_count = sc_q.scalar()
@@ -381,7 +425,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             q = (
                 db.query(Document, DbSession.name)
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(_active_cond).filter(_extra_cond)
+                .filter(_active_cond).filter(_extra_cond).filter(folder_cond)
             )
             q = _owner_session_filter(q, user)
 
@@ -431,6 +475,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     "session_id": doc.session_id,
                     "session_name": session_name,
                     "title": doc.title,
+                    "folder": doc.folder or "",
                     "language": _library_language_for_document(doc),
                     "preview": (doc.current_content or "")[:500],
                     "version_count": doc.version_count,
@@ -444,6 +489,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 "languages": languages,
                 "session_count": session_count,
             }
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to fetch document library: {e}")
             raise HTTPException(500, f"Failed to fetch document library: {e}")
@@ -713,6 +760,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if not doc:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, user)
+            if req.folder is not None:
+                doc.folder = create_folder(db, user, _folder_path(req.folder))
             if req.title is not None:
                 doc.title = req.title
             if req.language is not None:
@@ -1178,7 +1227,12 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if not pdf_path:
                 raise HTTPException(404, f"Source PDF {upload_id} not found")
 
-            fitz = _load_pdf_viewer_fitz()
+            try:
+                fitz = _load_pdf_viewer_fitz()
+            except HTTPException as exc:
+                if exc.status_code != 503:
+                    raise
+                return {"doc_id": doc_id, "renderer": "browser", "pages": []}
             schema = load_field_sidecar(pdf_path) or []
             values = parse_markdown_to_values(doc.current_content or "")
 
@@ -1276,7 +1330,6 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         """
         import base64
         import json
-        import fitz
         from src.pdf_form_doc import find_source_upload_id
         from src.document_processor import _resolve_vl_model, _load_vl_settings
         from src.llm_core import llm_call_async
@@ -1301,6 +1354,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(404, "Source PDF not found")
         finally:
             db.close()
+
+        fitz = _load_pdf_viewer_fitz()
 
         # Resolve VL model (admin-configured or auto-detected vision-capable)
         settings = _load_vl_settings()
@@ -1447,6 +1502,16 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             pdf_path = _locate_current_user_upload(request, upload_id, user)
             if not pdf_path:
                 raise HTTPException(404, f"Source PDF {upload_id} not found")
+
+            # The browser can display the original file without server-side
+            # rasterization. Keep this explicit so saved form edits are never
+            # silently omitted from a filled preview or export.
+            if request.query_params.get("source") == "1":
+                return FileResponse(
+                    pdf_path,
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": "inline", "Cache-Control": "no-store"},
+                )
 
             # Fail fast with a clear 503 if the optional PyMuPDF dependency
             # is missing — fill_fields/stamp_annotations will otherwise

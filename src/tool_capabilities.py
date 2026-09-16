@@ -316,7 +316,7 @@ _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "manage_calendar": frozenset({"list_calendars", "list_events"}),
         "manage_contact": frozenset({"list"}),
-        "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
+        "manage_documents": frozenset({"list", "read", "view", "open", "get", "list_folders"}),
         "manage_memory": frozenset({"list", "search"}),
         "manage_notes": frozenset({"list", "search", "find", "view"}),
         "manage_research": frozenset({"list", "read", "open", "view", "get"}),
@@ -332,7 +332,7 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
             {"create_event", "update_event", "delete_event"}
         ),
         "manage_contact": frozenset({"add", "update", "edit", "delete"}),
-        "manage_documents": frozenset({"delete", "tidy"}),
+        "manage_documents": frozenset({"delete", "restore", "tidy", "create_folder", "move"}),
         "manage_memory": frozenset({"add", "edit", "delete"}),
         "manage_notes": frozenset({"add", "update", "delete", "toggle_item"}),
         "manage_research": frozenset({"delete"}),

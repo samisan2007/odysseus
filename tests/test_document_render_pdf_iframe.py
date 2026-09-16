@@ -136,11 +136,12 @@ def test_db(monkeypatch):
             pass
 
 
-def _req():
+def _req(**query_params):
     """Minimal request stub."""
     return SimpleNamespace(
         state=SimpleNamespace(current_user="tester"),
         app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
+        query_params=query_params,
     )
 
 
@@ -236,3 +237,61 @@ async def test_render_pdf_503_runs_before_file_io(monkeypatch, test_db, tmp_path
         await render_pdf(doc_id, _req())
 
     assert excinfo.value.status_code == 503
+
+
+@pytest.fixture
+def missing_pdf_renderer(monkeypatch):
+    from src import pdf_runtime
+
+    def unavailable():
+        raise RuntimeError(pdf_runtime.PDF_VIEWER_PYMUPDF_MISSING)
+
+    monkeypatch.setattr(pdf_runtime, "load_pymupdf_for_pdf_viewer", unavailable)
+
+
+async def test_render_pages_falls_back_to_browser_without_pymupdf(
+    monkeypatch, test_db, missing_pdf_renderer,
+):
+    monkeypatch.setattr(droutes, "_resolve_user_upload_path", lambda *a, **kw: "/tmp/source.pdf")
+    endpoint = _endpoint("GET", "/api/document/{doc_id}/render-pages", upload_handler=MagicMock())
+    doc_id = _make_pdf_doc(test_db)
+    result = await endpoint(doc_id, _req())
+    assert result == {"doc_id": doc_id, "renderer": "browser", "pages": []}
+
+
+async def test_original_pdf_preview_does_not_require_pymupdf(
+    monkeypatch, test_db, missing_pdf_renderer, tmp_path,
+):
+    from pypdf import PdfWriter
+
+    source = tmp_path / "source.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.write(source)
+    monkeypatch.setattr(droutes, "_resolve_user_upload_path", lambda *a, **kw: str(source))
+    endpoint = _endpoint("GET", "/api/document/{doc_id}/render-pdf", upload_handler=MagicMock())
+    doc_id = _make_pdf_doc(test_db)
+    response = await endpoint(doc_id, _req(source="1"))
+    assert response.path == str(source)
+    assert response.media_type == "application/pdf"
+    assert response.headers["content-disposition"] == "inline"
+    assert response.headers["cache-control"] == "no-store"
+    assert source.read_bytes().startswith(b"%PDF-")
+
+
+@pytest.mark.parametrize("path", ["render-pdf", "render-pages"])
+async def test_browser_pdf_fallback_still_checks_document_owner(
+    monkeypatch, test_db, missing_pdf_renderer, path,
+):
+    from fastapi import HTTPException
+
+    resolver = MagicMock(return_value="/tmp/source.pdf")
+    monkeypatch.setattr(droutes, "_resolve_user_upload_path", resolver)
+    endpoint = _endpoint("GET", "/api/document/{doc_id}/" + path, upload_handler=MagicMock())
+    doc_id = _make_pdf_doc(test_db)
+    request = _req(source="1")
+    request.state.current_user = "someone-else"
+    with pytest.raises(HTTPException) as error:
+        await endpoint(doc_id, request)
+    assert error.value.status_code in (403, 404)
+    resolver.assert_not_called()

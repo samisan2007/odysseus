@@ -299,6 +299,7 @@ class Document(TimestampMixin, Base):
     # SET NULL), orphaning the doc and making it vanish from the owner's
     # Library + search. Owning the row directly is robust against that.
     owner           = Column(String, nullable=True, index=True)
+    folder          = Column(String, nullable=False, default="", server_default="")
     tidy_verdict    = Column(String, nullable=True)        # "keep", "junk", or None (not yet reviewed)
     # Provenance: if this document was created by opening an email attachment,
     # these point back to the source email so the "Sign and reply" flow can
@@ -311,6 +312,14 @@ class Document(TimestampMixin, Base):
     session  = relationship("Session", backref=backref("documents", cascade="save-update, merge"))
     versions = relationship("DocumentVersion", back_populates="document",
                            cascade="all, delete-orphan", order_by="DocumentVersion.version_number")
+
+
+class DocumentFolder(Base):
+    """Persistent library paths, including empty folders, scoped to their owner."""
+    __tablename__ = "document_folders"
+
+    owner = Column(String, primary_key=True, default="")
+    path = Column(String, primary_key=True)
 
 
 class DocumentVersion(Base):
@@ -909,6 +918,15 @@ def _migrate_add_last_message_at_column():
             conn.close()
         except Exception:
             pass
+
+def _migrate_add_document_folder_column():
+    """Keep existing documents in the library root on upgrade."""
+    with engine.begin() as conn:
+        columns = {column["name"] for column in inspect(conn).get_columns("documents")}
+        if "folder" not in columns:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN folder VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("UPDATE documents SET folder = '' WHERE folder IS NULL"))
+
 
 def _migrate_add_document_archived_column():
     """Add `archived` to documents (soft-archive flag). Guarded + idempotent."""
@@ -2112,6 +2130,7 @@ def init_db():
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
+    _migrate_add_document_folder_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
     _migrate_add_token_columns()

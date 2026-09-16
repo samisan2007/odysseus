@@ -670,7 +670,7 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
         if args.get("language"):
             parts.append(args["language"])
         parts.append(args.get("content", ""))
-        content = "\n".join(parts)
+        content = json.dumps(args) if "folder" in args else "\n".join(parts)
     elif tool_type == "update_document":
         content = args.get("content", "")
     elif tool_type in ("edit_document", "suggest_document"):

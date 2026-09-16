@@ -319,6 +319,7 @@ def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional
     new_doc = Document(
         id=doc_id,
         session_id=getattr(source_doc, "session_id", None),
+        folder=getattr(source_doc, "folder", "") or "",
         title=title,
         language="markdown",
         current_content=clean,
@@ -369,14 +370,26 @@ class CreateDocumentTool:
             "ini", "ruby", "php", "csv", "email", "text", "plain", "svg",
         }
 
-        # Try XML tag extraction first
-        title = None
-        language = None
-        content = None
+        # Structured calls retain the folder alongside the existing document fields.
+        import json
+        structured = None
+        if raw.lstrip().startswith("{"):
+            try:
+                candidate = json.loads(raw)
+                if isinstance(candidate, dict) and "content" in candidate and "title" in candidate:
+                    structured = candidate
+            except ValueError:
+                pass
+        folder = structured.get("folder", "") if structured else ""
+        title = structured.get("title") if structured else None
+        language = structured.get("language") if structured else None
+        content = structured.get("content") if structured else None
+        if structured and not all(isinstance(v, str) for v in (title, content, folder)):
+            return {"error": "title, content and folder must be strings", "exit_code": 1}
         mt = _re.search(r"<title>\s*(.*?)\s*</title>", raw, _re.DOTALL | _re.IGNORECASE)
         ml = _re.search(r"<language>\s*(.*?)\s*</language>", raw, _re.DOTALL | _re.IGNORECASE)
         mc = _re.search(r"<content>\s*(.*?)\s*</content>", raw, _re.DOTALL | _re.IGNORECASE)
-        if mt or mc:
+        if not structured and (mt or mc):
             title = mt.group(1).strip() if mt else None
             language = ml.group(1).strip().lower() if ml else None
             content = mc.group(1) if mc else None
@@ -455,8 +468,12 @@ class CreateDocumentTool:
                     "exit_code": 1,
                 }
 
+            if folder:
+                from src.document_library import create_folder
+                folder = create_folder(db, _owner, folder)
             doc = Document(
                 id=doc_id,
+                folder=folder,
                 session_id=session_id,
                 title=title,
                 language=language,
@@ -486,6 +503,7 @@ class CreateDocumentTool:
 
             return {
                 "action": "create",
+                "folder": folder,
                 "doc_id": doc_id,
                 "title": title,
                 "language": language,
@@ -819,6 +837,26 @@ class ManageDocumentTool:
             return ts.strftime('%Y-%m-%d')
 
         try:
+            if action in ("list_folders", "create_folder", "move"):
+                from src.document_library import create_folder, list_folders, move_document
+                if not owner:
+                    return {"error": "Document owner is required", "exit_code": 1}
+                if action == "list_folders":
+                    folders = list_folders(db, owner)
+                    return {"folders": folders, "response": "Library folders:\n/\n" + "\n".join(f["path"] for f in folders), "exit_code": 0}
+                if "folder" not in args:
+                    return {"error": "folder is required (use an empty string for root)", "exit_code": 1}
+                if action == "create_folder":
+                    folder = create_folder(db, owner, args["folder"])
+                    db.commit()
+                    return {"folder": folder, "response": f"Created library folder: {folder or '/'}", "exit_code": 0}
+                doc_id = args.get("document_id")
+                if not doc_id:
+                    return {"error": "move requires document_id", "exit_code": 1}
+                doc = move_document(db, owner, doc_id, args["folder"])
+                db.commit()
+                return {"document_id": doc.id, "folder": doc.folder, "response": f"Moved '{doc.title}' to {doc.folder or '/'}", "exit_code": 0}
+
             if action == "list":
                 show_deleted = bool(args.get("deleted") or args.get("include_deleted"))
                 q = db.query(Document).filter(Document.is_active == (not show_deleted))
@@ -827,6 +865,10 @@ class ManageDocumentTool:
                     q = q.filter(Document.title.ilike(f"%{args['search']}%"))
                 if args.get("language"):
                     q = q.filter(Document.language == args["language"])
+                if "folder" in args:
+                    from src.document_library import validate_folder_path
+                    from sqlalchemy import func
+                    q = q.filter(func.coalesce(Document.folder, "") == validate_folder_path(args["folder"]))
                 docs = q.order_by(Document.updated_at.desc()).limit(args.get("limit", 50)).all()
                 if not docs:
                     if show_deleted:
@@ -844,7 +886,7 @@ class ManageDocumentTool:
                     lines.append(
                         f"- [{d.title}](#document-{d.id}) — {lang}, {size} chars, updated {_rel(ts)}{marker}"
                     )
-                    items.append({"id": d.id, "title": d.title, "language": lang, "size": size})
+                    items.append({"id": d.id, "title": d.title, "language": lang, "size": size, "folder": getattr(d, "folder", "") or ""})
                 if show_deleted:
                     header = f"Found {len(docs)} deleted document(s), sorted most-recently-deleted first. Use action='restore' with the id to bring one back:"
                 else:
@@ -884,6 +926,7 @@ class ManageDocumentTool:
                         "id": doc.id,
                         "title": doc.title,
                         "language": doc.language,
+                        "folder": getattr(doc, "folder", "") or "",
                         "size": len(body),
                         "content": preview,
                         "truncated": truncated,

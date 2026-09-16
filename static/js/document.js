@@ -1161,6 +1161,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (!res.ok) throw new Error(await _pdfResponseErrorMessage(res));
       data = await res.json();
     } catch (e) {
+      if (docId !== activeDocId) return;
       pane.innerHTML = `<div style="color:#fbb;padding:40px;text-align:center;">Failed to load PDF view: ${_escHtml(e.message || String(e))}</div>`;
       if (savedPill) pane.appendChild(savedPill);
       return;
@@ -1169,6 +1170,38 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     pane.innerHTML = '';
     if (savedPill) pane.appendChild(savedPill);
+    document.querySelectorAll('.md-toolbar-pdf-only:not(#doc-pdf-refresh-btn)').forEach(el => {
+      el.style.display = data.renderer === 'browser' ? 'none' : '';
+    });
+    if (data.renderer === 'browser') {
+      _pdfPaneFieldsByDoc.delete(docId);
+      _pdfPaneAnnotationsByDoc.delete(docId);
+      _setPdfDropMode(null);
+      const url = `${API_BASE}/api/document/${encodeURIComponent(docId)}/render-pdf?source=1`;
+      const viewer = document.createElement('div');
+      viewer.style.cssText = 'height:100%;min-height:420px;display:flex;flex-direction:column;gap:8px;';
+      const notice = document.createElement('div');
+      notice.style.cssText = 'color:#ddd;font-size:12px;padding:0 12px;';
+      const content = docs.get(docId)?.content || '';
+      notice.textContent = /<!--\s*(?:pdf_form_source|annotation)\b/.test(content)
+        ? 'Original PDF. Saved field edits and annotations are not shown. '
+        : 'Original PDF. ';
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = 'Open PDF';
+      link.style.color = 'inherit';
+      notice.appendChild(link);
+      const frame = document.createElement('iframe');
+      frame.src = url;
+      frame.title = docs.get(docId)?.title || 'PDF document';
+      frame.style.cssText = 'width:100%;flex:1;min-height:360px;border:0;background:#fff;';
+      viewer.appendChild(notice);
+      viewer.appendChild(frame);
+      pane.appendChild(viewer);
+      return;
+    }
     const fieldRefs = [];
     // Reset annotation refs for this doc before the page loop — we rebuild them
     // page by page from the live markdown.
@@ -7011,7 +7044,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // Create a new blank document, reusing the current/last session or
   // auto-creating one. Same flow as the tab-bar "+" — the single entry point
   // the sidebar Library "+" should use too.
-  export async function newDocument() {
+  export async function newDocument(options = {}) {
     let sessionId = docs.get(activeDocId)?.sessionId
       || _lastSessionId
       || (sessionModule && sessionModule.getCurrentSessionId());
@@ -7019,10 +7052,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       try { sessionId = await _autoCreateSession(); }
       catch (e) { console.error('Failed to auto-create session for document:', e); return; }
     }
-    await createDocument(sessionId);
+    return createDocument(sessionId, options);
   }
 
-  export async function createDocument(sessionId) {
+  export async function createDocument(sessionId, options = {}) {
     if (_creatingDoc) return;
     _creatingDoc = true;
     // If the panel was in empty-state, the user may type into the editor
@@ -7039,6 +7072,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           title: '',
           content: '',
           language: 'markdown',
+          folder: options.folder || '',
         }),
       });
       if (!res.ok) throw new Error(`Document create failed: HTTP ${res.status}`);
@@ -7067,6 +7101,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       }
       textarea = document.getElementById('doc-editor-textarea');
       if (textarea) textarea.focus();
+      return doc;
     } catch (e) {
       console.error('Failed to create document:', e);
       if (uiModule) uiModule.showError('Failed to create document');

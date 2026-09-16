@@ -62,6 +62,9 @@ let _libraryActiveLanguage = null;
 let _librarySort = 'recent';
 let _librarySearch = '';
 let _librarySearchDebounce = null;
+let _libraryFolder = null; // null = all documents; '' = library root
+let _libraryFolders = [];
+let _libraryFetchVersion = 0;
 
 // Highlight the active search terms inside a plain string. Escapes first,
 // then wraps each whitespace-separated term in <mark>. Multi-term, matching
@@ -314,7 +317,100 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     return new Date(isoString).toLocaleDateString();
   }
 
+  async function libraryReadResponse(res) {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || data.error || `HTTP ${res.status}`;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    return data;
+  }
+
+  function libraryRenderFolders() {
+    const select = document.getElementById('doclib-folder');
+    if (!select) return;
+    select.replaceChildren();
+    const entries = [
+      ['*', 'All documents'], ['', 'Library root'],
+      ..._libraryFolders.map(folder => [folder.path, folder.path]),
+    ];
+    for (const [value, label] of entries) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+    select.value = _libraryFolder === null ? '*' : _libraryFolder;
+    const createBtn = document.getElementById('doclib-new-folder');
+    if (createBtn) createBtn.textContent = _libraryFolder ? 'New subfolder' : 'New folder';
+  }
+
+  async function libraryFetchFolders() {
+    try {
+      const data = await libraryReadResponse(await fetch(`${API_BASE}/api/documents/folders`, {
+        credentials: 'same-origin',
+      }));
+      _libraryFolders = (data.folders || []).sort((a, b) => a.path.localeCompare(b.path));
+      libraryRenderFolders();
+    } catch (err) {
+      uiModule.showError('Failed to load folders: ' + err.message);
+    }
+  }
+
+  async function libraryCreateFolder() {
+    const path = await uiModule.styledPrompt('Use / for subfolders, for example Work/Notes.', {
+      title: _libraryFolder ? 'New subfolder' : 'New folder',
+      defaultValue: _libraryFolder ? _libraryFolder + '/' : '',
+      placeholder: 'Work/Notes', confirmText: 'Create', maxLength: 500,
+    });
+    if (!path) return;
+    try {
+      const data = await libraryReadResponse(await fetch(`${API_BASE}/api/documents/folders`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      }));
+      _libraryFolder = data.path || path;
+      if (_librarySelectMode) libraryExitSelectMode();
+      await libraryFetchFolders();
+      await libraryFetch(false);
+    } catch (err) {
+      uiModule.showError('Failed to create folder: ' + err.message);
+    }
+  }
+
+  async function libraryMoveDocuments(ids) {
+    const folder = await uiModule.styledPrompt('Enter a folder path, such as Work/Notes. Leave blank for Library root. New folders are created automatically.', {
+      title: 'Move to folder',
+      defaultValue: _libraryFolder || _libraryDocs.find(doc => doc.id === ids[0])?.folder || '',
+      placeholder: 'Library root', confirmText: 'Move', maxLength: 500,
+    });
+    if (folder === null) return;
+    try {
+      const results = await Promise.allSettled(ids.map(async id => {
+        await libraryReadResponse(await fetch(`${API_BASE}/api/document/${id}`, {
+          method: 'PATCH', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder }),
+        }));
+        _librarySelectedIds.delete(id);
+      }));
+      const failures = results.filter(result => result.status === 'rejected');
+      if (!failures.length) {
+        if (_librarySelectMode) libraryExitSelectMode();
+        uiModule.showToast(`Moved ${ids.length} document${ids.length !== 1 ? 's' : ''} to ${folder || 'Library root'}`);
+      } else {
+        uiModule.showError(`Moved ${ids.length - failures.length} of ${ids.length} documents. ${failures[0].reason.message}`);
+      }
+      await libraryFetchFolders();
+      await libraryFetch(false);
+      libraryUpdateBulkCount();
+    } catch (err) {
+      uiModule.showError('Failed to move documents: ' + err.message);
+    }
+  }
+
   async function libraryFetch(append) {
+    const requestVersion = ++_libraryFetchVersion;
     if (!append) _libraryOffset = 0;
     // Bump page size to the backend max (50) so fullscreen doesn't leave
     // empty space below the loaded rows — same idea as emailLibrary's
@@ -325,6 +421,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       offset: String(_libraryOffset),
       limit: '50',
     });
+    if (_libraryFolder !== null) params.set('folder', _libraryFolder);
     if (_librarySearch) params.set('search', _librarySearch);
     if (_libraryActiveLanguage) params.set('language', _libraryActiveLanguage);
     if (_libraryDeletedView) params.set('deleted', 'true');
@@ -332,8 +429,8 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
 
     try {
       const res = await fetch(`${API_BASE}/api/documents/library?${params}`);
-      if (!res.ok) throw new Error(res.statusText);
-      const data = await res.json();
+      const data = await libraryReadResponse(res);
+      if (requestVersion !== _libraryFetchVersion) return;
 
       if (append) {
         _libraryDocs = _libraryDocs.concat(data.documents);
@@ -351,6 +448,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       libraryRenderLoadMore();
     } catch (e) {
       console.error('Library fetch error:', e);
+      if (requestVersion === _libraryFetchVersion) uiModule.showError('Failed to load documents: ' + e.message);
     }
   }
 
@@ -583,6 +681,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     meta.style.cssText = 'font-size:10px;opacity:0.55;margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
     const _esc = (s) => uiModule.esc(String(s || ''));
     const pieces = [];
+    if (_libraryFolder === null) pieces.push(`<span title="Folder">${_esc(doc.folder || 'Library root')}</span>`);
     if (doc.session_name) pieces.push(`<span>${_esc(doc.session_name)}</span>`);
     if (doc.language && doc.language !== 'text') {
       // Per-language icon lives in the title row above; just the language
@@ -618,6 +717,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
         const items = [];
         if (doc.session_id) items.push({ label: 'Open', action: () => libraryOpenInSession(doc) });
         items.push({ label: 'Clone', action: () => libraryImportDocument(doc) });
+        if (!_libraryDeletedView) items.push({ label: 'Move to folder', action: () => libraryMoveDocuments([doc.id]) });
         _showLibDropdown(menuBtn, items, { onSelect: () => {
           libraryEnterSelectMode();
           _librarySelectedIds.add(doc.id);
@@ -704,6 +804,15 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     cloneItem.title = 'Clone to active session';
     cloneItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryImportDocument(doc); });
     dropdown.appendChild(cloneItem);
+
+    if (!_libraryDeletedView) {
+      const moveItem = document.createElement('button');
+      moveItem.className = 'dropdown-item-compact';
+      moveItem.style.cssText = 'background:none;border:none;width:100%;';
+      moveItem.textContent = 'Move to folder';
+      moveItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryMoveDocuments([doc.id]); });
+      dropdown.appendChild(moveItem);
+    }
 
     // Export
     const _exportIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
@@ -1061,6 +1170,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
 
   /** Copy a document from the library into the current session */
   async function libraryImportDocument(doc) {
+    const folder = _libraryFolder ?? doc.folder ?? '';
     let sessionId = sessionModule && sessionModule.getCurrentSessionId();
     if (!sessionId) {
       // Create a new session if none exists
@@ -1118,6 +1228,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
           // (the backend also sniffs, but this keeps the tab label correct).
           language: src.language || doc.language || 'markdown',
           content: src.current_content || '',
+          folder,
         }),
       });
       if (!res.ok) throw new Error('Failed to create document');
@@ -1499,6 +1610,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
 
   /** Import files from disk into the document library */
   async function libraryImportFiles(fileList) {
+    const folder = _libraryFolder || '';
     const EXT_TO_LANG = {
       '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
       '.html': 'html', '.htm': 'html', '.css': 'css', '.md': 'markdown',
@@ -1538,6 +1650,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
           // view, and plain PDFs get the static page-image viewer.
           const fd = new FormData();
           fd.append('file', file);
+          fd.append('folder', folder);
           const res = await fetch(`${API_BASE}/api/documents/import-pdf`, {
             method: 'POST',
             body: fd,
@@ -1564,7 +1677,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
             const res = await fetch(`${API_BASE}/api/document`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title: sheetTitle, language: 'csv', content: csv }),
+              body: JSON.stringify({ title: sheetTitle, language: 'csv', content: csv, folder }),
             });
             if (!res.ok) throw new Error('Server error');
           }
@@ -1574,7 +1687,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
           const res = await fetch(`${API_BASE}/api/document`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: baseTitle, language, content }),
+            body: JSON.stringify({ title: baseTitle, language, content, folder }),
           });
           if (!res.ok) throw new Error('Server error');
           imported++;
@@ -1725,7 +1838,15 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
               <button class="memory-toolbar-btn" id="doclib-import-file-btn" title="Import files from disk" style="margin-left:auto;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:2px;"><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="21" x2="19" y2="21"/></svg> Import</button>
               <button class="memory-toolbar-btn" id="doclib-create-btn" title="Create new blank document"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> Create</button>
             </div>
-            <p class="memory-desc doclib-desc">Open documents in a session, clone to a new or import new files.</p>
+            <p class="memory-desc doclib-desc">Organize documents in folders, open them in a session, or import files.</p>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+              <label for="doclib-folder" style="font-size:12px;">Folder</label>
+              <select id="doclib-folder" class="memory-sort-select" aria-label="Library folder" style="flex:1;min-width:100px;max-width:100%;">
+                <option value="*">All documents</option>
+                <option value="">Library root</option>
+              </select>
+              <button class="memory-toolbar-btn" id="doclib-new-folder" type="button" title="Create a folder or subfolder">New folder</button>
+            </div>
             <div class="memory-toolbar">
               <div class="memory-category-filters">
                 <select class="memory-sort-select" id="doclib-sort">
@@ -3185,6 +3306,15 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     // sync from "Library" to the active sub-tab on first open.
     _switchLibTab(_activeLibTab);
 
+    libraryFetchFolders();
+    document.getElementById('doclib-folder').addEventListener('change', (e) => {
+      _libraryFolder = e.target.value === '*' ? null : e.target.value;
+      if (_librarySelectMode) libraryExitSelectMode();
+      libraryRenderFolders();
+      libraryFetch(false);
+    });
+    document.getElementById('doclib-new-folder').addEventListener('click', libraryCreateFolder);
+
     const searchInput = document.getElementById('doclib-search');
     searchInput.addEventListener('input', () => {
       clearTimeout(_librarySearchDebounce);
@@ -3252,11 +3382,11 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       createBtn.addEventListener('click', async () => {
         try {
           if (_newDocument) {
-            await _newDocument();
+            await _newDocument({ folder: _libraryFolder || '' });
           } else {
             const sessionId = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
             if (!sessionId) throw new Error('No active session');
-            await _createDocument(sessionId);
+            await _createDocument(sessionId, { folder: _libraryFolder || '' });
           }
           closeLibrary();
           setTimeout(() => _openPanel(), 50);
@@ -3401,6 +3531,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       // No hard-delete exists yet, so there's nothing further to delete from
       // inside the Trash view itself -- only Restore (above) makes sense there.
       if (!_libraryDeletedView) {
+        bulkItems.push({ label: 'Move to folder', action: () => libraryMoveDocuments([..._librarySelectedIds]) });
         bulkItems.push({ label: 'Delete', icon: 'delete', danger: true, action: libraryBulkDelete });
       }
       _showLibDropdown(e.currentTarget, bulkItems, { onCancel: libraryExitSelectMode });
@@ -3440,6 +3571,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
   export function closeLibrary() {
     if (!_libraryOpen) return;
     _libraryOpen = false;
+    ++_libraryFetchVersion;
     _librarySelectMode = false;
     _librarySelectedIds.clear();
     _libraryImportMode = false;
