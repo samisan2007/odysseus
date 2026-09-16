@@ -1487,7 +1487,9 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     }
 
 
-def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
+def _turn_targets_active_document(
+    intent: Dict[str, object], last_user: str, active_document, messages: Optional[List[Dict]] = None,
+) -> bool:
     """Return whether an open document should affect this turn.
 
     The editor can stay open while the user asks unrelated things ("who am I?",
@@ -1498,6 +1500,24 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     """
     if active_document is None:
         return False
+    # Once the document's title has come up in the conversation (either side
+    # — the user naming it, or the assistant referencing it in a refusal or
+    # clarifying question), treat it as in-play for a few more short replies.
+    # The keyword/continuation checks below only look at the CURRENT message,
+    # so a terse correction like "yes you do" or "i opened it do the
+    # addition" — a real reply to "I can't edit without the tool" / "which
+    # document?" — matched nothing and made the model insist it had no edit
+    # tool, then create a duplicate instead of editing. The title is the one
+    # signal already in hand that's both cheap and unambiguous.
+    title = (getattr(active_document, "title", "") or "").strip()
+    if messages and len(re.sub(r"[^A-Za-z0-9]", "", title)) >= 4:
+        title_l = title.lower()
+        for msg in list(reversed(messages))[:6]:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+            if title_l in str(content or "").lower():
+                return True
     raw_doc = getattr(active_document, "current_content", "") or ""
     title_l = (getattr(active_document, "title", "") or "").strip().lower()
     is_email_doc = (
@@ -3531,7 +3551,7 @@ async def stream_agent_loop(
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
     _existing_conversation = _user_turn_count(messages) > 1
-    _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
+    _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document, messages)
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
     if _active_email_draft_relevant:
         disabled_tools.update({
@@ -3987,6 +4007,18 @@ async def stream_agent_loop(
         ):
             _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
             logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+
+    # A bound workspace means the user can always ask "what's in these files"
+    # regardless of phrasing. `_looks_like_workspace_coding_request` above only
+    # fires on repo/coding-flavored wording (fix/debug/refactor + repo/file/
+    # folder), so a plain "summarize these two docx" or "what do these say"
+    # request could retrieve zero file tools and leave the agent unable to
+    # read anything, even with a workspace actively selected. Guarantee the
+    # read-only file tools every turn a workspace is active; write/execute
+    # tools stay gated behind the existing RAG/keyword/coding-request signals.
+    if not guide_only and workspace and _relevant_tools is not None:
+        from src.tool_security import PLAN_MODE_READONLY_TOOLS
+        _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
