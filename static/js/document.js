@@ -7073,6 +7073,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           content: '',
           language: 'markdown',
           folder: options.folder || '',
+          tag_ids: Array.isArray(options.tag_ids) ? options.tag_ids : [],
         }),
       });
       if (!res.ok) throw new Error(`Document create failed: HTTP ${res.status}`);

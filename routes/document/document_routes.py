@@ -8,12 +8,16 @@ from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
 
 from sqlalchemy import case, func, or_
-from core.database import SessionLocal, Document, DocumentVersion
+from core.database import SessionLocal, Document, DocumentVersion, DocumentTag
 from core.database import Session as DbSession
 from src.auth_helpers import get_current_user, _auth_disabled
 from src.constants import MAIL_ATTACHMENTS_DIR
 from src.upload_handler import reserve_upload_references
-from src.document_library import validate_folder_path, create_folder, list_folders
+from src.document_library import (
+    validate_folder_path, create_folder, list_folders,
+    list_tags, create_tag, rename_tag, delete_tag,
+    resolve_tag_ids, set_document_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +73,7 @@ def _email_source_key(content: str) -> tuple[str, str]:
 
 
 from routes.document_helpers import (
-    DocumentCreate, DocumentUpdate, DocumentPatch,
+    DocumentCreate, DocumentUpdate, DocumentPatch, TagName,
     _doc_to_dict, _version_to_dict,
     _verify_doc_owner, _owner_session_filter,
     _slug, _resolve_user_upload_path, _assert_pdf_marker_upload_owned, _derive_title,
@@ -85,6 +89,70 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             return validate_folder_path(path)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    def _tag_response(db, user, tag_id):
+        return next(tag for tag in list_tags(db, user) if tag['id'] == tag_id)
+
+    @router.get('/api/documents/tags')
+    async def get_library_tags(request: Request):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, 'can_use_documents')
+        db = SessionLocal()
+        try:
+            return {'tags': list_tags(db, user)}
+        finally:
+            db.close()
+
+    @router.post('/api/documents/tags')
+    async def create_library_tag(request: Request, req: TagName):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, 'can_use_documents')
+        db = SessionLocal()
+        try:
+            tag = create_tag(db, user, req.name)
+            db.commit()
+            return _tag_response(db, user, tag.id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, str(exc)) from exc
+        finally:
+            db.close()
+
+    @router.patch('/api/documents/tags/{tag_id}')
+    async def patch_library_tag(request: Request, tag_id: str, req: TagName):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, 'can_use_documents')
+        db = SessionLocal()
+        try:
+            tag = rename_tag(db, user, tag_id, req.name)
+            db.commit()
+            return _tag_response(db, user, tag.id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, str(exc)) from exc
+        finally:
+            db.close()
+
+    @router.delete('/api/documents/tags/{tag_id}')
+    async def delete_library_tag(request: Request, tag_id: str):
+        from src.auth_helpers import require_privilege
+        user = require_privilege(request, 'can_use_documents')
+        db = SessionLocal()
+        try:
+            delete_tag(db, user, tag_id)
+            db.commit()
+            return {'status': 'deleted', 'id': tag_id}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, str(exc)) from exc
+        finally:
+            db.close()
 
     @router.get("/api/documents/folders")
     async def get_library_folders(request: Request):
@@ -207,8 +275,14 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                                 summary="Updated existing email draft",
                                 source="user",
                             ))
-                            db.commit()
-                            db.refresh(existing)
+                        fields_set = (
+                            req.model_fields_set if hasattr(req, 'model_fields_set')
+                            else req.__fields_set__
+                        )
+                        if 'tag_ids' in fields_set:
+                            set_document_tags(db, user, existing, req.tag_ids)
+                        db.commit()
+                        db.refresh(existing)
                         return _doc_to_dict(existing)
 
             doc_id = str(uuid.uuid4())
@@ -238,6 +312,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             db.add(doc)
             db.add(ver)
+            set_document_tags(db, user, doc, req.tag_ids)
             db.commit()
             db.refresh(doc)
             try:
@@ -261,6 +336,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         request: Request,
         file: UploadFile = File(...),
         session_id: Optional[str] = Form(None),
+        tag_ids: List[str] = Form(default=[]),
         folder: str = Form(""),
     ) -> Dict[str, Any]:
         """Upload a PDF and create the matching Document.
@@ -355,6 +431,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if not doc.owner and user:
                 doc.owner = user
             doc.folder = create_folder(db, user, folder)
+            set_document_tags(db, user, doc, tag_ids)
             db.commit()
             db.refresh(doc)
             return _doc_to_dict(doc)
@@ -373,6 +450,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         archived: bool = Query(False),
         deleted: bool = Query(False),
         folder: Optional[str] = Query(None),
+        tag_id: List[str] = Query(default=[]),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
         folder_cond = True if folder is None else func.coalesce(Document.folder, "") == _folder_path(folder)
@@ -429,6 +507,12 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             q = _owner_session_filter(q, user)
 
+            selected_tags = resolve_tag_ids(
+                db, user, list(dict.fromkeys(tag_id)),
+            ) if tag_id else []
+            for tag in selected_tags:
+                q = q.filter(Document.tags.any(DocumentTag.id == tag.id))
+
             # Search filter — split on whitespace and require EACH term to
             # match (title OR content). A single `%foo bar%` LIKE only matched
             # the exact adjacent phrase, so any multi-word query with a space
@@ -471,6 +555,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             documents = []
             for doc, session_name in rows:
                 documents.append({
+                    'tags': [{'id': tag.id, 'name': tag.name} for tag in sorted(
+                        doc.tags, key=lambda tag: (tag.name.casefold(), tag.id),
+                    )],
                     "id": doc.id,
                     "session_id": doc.session_id,
                     "session_name": session_name,
@@ -762,6 +849,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             _verify_doc_owner(db, doc, user)
             if req.folder is not None:
                 doc.folder = create_folder(db, user, _folder_path(req.folder))
+            if req.tag_ids is not None:
+                set_document_tags(db, user, doc, req.tag_ids)
             if req.title is not None:
                 doc.title = req.title
             if req.language is not None:

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text
+from sqlalchemy import Table, UniqueConstraint, DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -280,6 +280,13 @@ class ChatMessage(Base):
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
     )
 
+document_tag_links = Table(
+    "document_tag_links", Base.metadata,
+    Column("document_id", String, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", String, ForeignKey("document_tags.id", ondelete="CASCADE"), primary_key=True, index=True),
+)
+
+
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
     __tablename__ = "documents"
@@ -309,6 +316,7 @@ class Document(TimestampMixin, Base):
     source_email_account_id  = Column(String, nullable=True)
     source_email_message_id  = Column(String, nullable=True, index=True)
 
+    tags = relationship("DocumentTag", secondary=document_tag_links, back_populates="documents")
     session  = relationship("Session", backref=backref("documents", cascade="save-update, merge"))
     versions = relationship("DocumentVersion", back_populates="document",
                            cascade="all, delete-orphan", order_by="DocumentVersion.version_number")
@@ -320,6 +328,18 @@ class DocumentFolder(Base):
 
     owner = Column(String, primary_key=True, default="")
     path = Column(String, primary_key=True)
+
+
+class DocumentTag(Base):
+    """Reusable owner-scoped labels; removing a label never deletes documents."""
+    __tablename__ = "document_tags"
+    __table_args__ = (UniqueConstraint("owner", "name_key", name="uq_document_tags_owner_name"),)
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, default="", index=True)
+    name = Column(String, nullable=False)
+    name_key = Column(String, nullable=False)
+    documents = relationship("Document", secondary=document_tag_links, back_populates="tags")
 
 
 class DocumentVersion(Base):

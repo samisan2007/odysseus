@@ -247,7 +247,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "title": {"type": "string", "description": "Document title"},
                     "language": {"type": "string", "description": "Programming language or format (e.g. python, javascript, markdown, text)"},
                     "content": {"type": "string", "description": "The document content"},
-                    "folder": {"type": "string", "description": "Library folder path, e.g. Work/Notes; creates missing parents. Omit or empty string for root."}
+                    "folder": {"type": "string", "description": "Library folder path, e.g. Work/Notes; creates missing parents. Omit or empty string for root."},
+                    "tag_ids": {"type": "array", "items": {"type": "string"}, "description": "Reusable library tag IDs to assign. Discover them with manage_documents action=list_tags."}
                 },
                 "required": ["title", "content"]
             }
@@ -808,12 +809,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents and nested library folders: list_folders discovers paths; create_folder with folder creates parents; move with document_id and folder organizes a document; read opens content; list all documents (with optional search/language/folder filter), delete documents, restore a deleted document, or run tidy cleanup. Delete is soft (recoverable) — use action='restore' with the same document_id to undo one, or list with deleted=true to find deleted documents you don't have the id for.",
+            "description": "Manage documents, nested folders, and reusable tags. list_tags/create_tag/rename_tag/delete_tag manage saved tags; deleting a tag keeps its documents. set_tags replaces a document's complete tag set. list tag_ids require ALL supplied tags.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "read", "list_folders", "create_folder", "move", "delete", "restore", "tidy"]},
-                    "document_id": {"type": "string", "description": "Document ID (for read/move/delete/restore)"},
+                    "action": {"type": "string", "enum": ["list", "read", "list_folders", "create_folder", "move", "list_tags", "create_tag", "rename_tag", "delete_tag", "set_tags", "delete", "restore", "tidy"]},
+                    "document_id": {"type": "string", "description": "Document ID (for read/move/set_tags/delete/restore)"},
+                    "tag_id": {"type": "string", "description": "Saved tag ID (for rename_tag/delete_tag)"},
+                    "name": {"type": "string", "description": "Tag name (for create_tag/rename_tag)"},
+                    "tag_ids": {"type": "array", "items": {"type": "string"}, "description": "For set_tags, replaces all tags ([] clears). For list, requires every supplied tag."},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
                     "folder": {"type": "string", "description": "Relative library path for create_folder/move or exact folder filter for list. Empty string means root; omit to list all folders."},
@@ -1458,7 +1462,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         if args.get("language"):
             parts.append(args["language"])
         parts.append(args.get("content", ""))
-        content = json.dumps(args) if "folder" in args else "\n".join(parts)
+        content = json.dumps(args) if "folder" in args or "tag_ids" in args else "\n".join(parts)
     elif tool_type == "edit_document":
         blocks = []
         edits = args.get("edits", [])

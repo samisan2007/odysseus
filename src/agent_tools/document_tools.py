@@ -320,6 +320,7 @@ def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional
         id=doc_id,
         session_id=getattr(source_doc, "session_id", None),
         folder=getattr(source_doc, "folder", "") or "",
+        tags=list(getattr(source_doc, "tags", [])),
         title=title,
         language="markdown",
         current_content=clean,
@@ -381,11 +382,14 @@ class CreateDocumentTool:
             except ValueError:
                 pass
         folder = structured.get("folder", "") if structured else ""
+        tag_ids = structured.get("tag_ids", []) if structured else []
         title = structured.get("title") if structured else None
         language = structured.get("language") if structured else None
         content = structured.get("content") if structured else None
         if structured and not all(isinstance(v, str) for v in (title, content, folder)):
             return {"error": "title, content and folder must be strings", "exit_code": 1}
+        if not isinstance(tag_ids, list) or any(not isinstance(tag_id, str) for tag_id in tag_ids):
+            return {"error": "tag_ids must be a list of saved tag IDs", "exit_code": 1}
         mt = _re.search(r"<title>\s*(.*?)\s*</title>", raw, _re.DOTALL | _re.IGNORECASE)
         ml = _re.search(r"<language>\s*(.*?)\s*</language>", raw, _re.DOTALL | _re.IGNORECASE)
         mc = _re.search(r"<content>\s*(.*?)\s*</content>", raw, _re.DOTALL | _re.IGNORECASE)
@@ -482,6 +486,9 @@ class CreateDocumentTool:
                 is_active=True,
                 owner=_owner,
             )
+            if tag_ids:
+                from src.document_library import set_document_tags
+                set_document_tags(db, _owner, doc, tag_ids)
             ver = DocumentVersion(
                 id=ver_id,
                 document_id=doc_id,
@@ -504,6 +511,7 @@ class CreateDocumentTool:
             return {
                 "action": "create",
                 "folder": folder,
+                "tags": [{"id": tag.id, "name": tag.name} for tag in getattr(doc, "tags", [])],
                 "doc_id": doc_id,
                 "title": title,
                 "language": language,
@@ -837,6 +845,41 @@ class ManageDocumentTool:
             return ts.strftime('%Y-%m-%d')
 
         try:
+            if action in ("list_tags", "create_tag", "rename_tag", "delete_tag", "set_tags"):
+                from src.document_library import (
+                    create_tag, delete_tag, document_tags, list_tags,
+                    rename_tag, set_document_tags,
+                )
+                if not owner:
+                    return {"error": "Document owner is required", "exit_code": 1}
+                if action == "list_tags":
+                    tags = list_tags(db, owner)
+                    lines = [f"- {tag['name']} (id={tag['id']}, {tag['document_count']} documents)" for tag in tags]
+                    return {"tags": tags, "response": "Library tags:\n" + "\n".join(lines) if tags else "No saved tags yet.", "exit_code": 0}
+                if action == "set_tags":
+                    if not args.get("document_id") or "tag_ids" not in args:
+                        return {"error": "set_tags requires document_id and tag_ids ([] clears tags)", "exit_code": 1}
+                    doc = _get_owned_document(db, Document, args["document_id"], owner)
+                    if not doc:
+                        return {"error": "Document not found", "exit_code": 1}
+                    set_document_tags(db, owner, doc, args["tag_ids"])
+                    db.commit()
+                    tags = document_tags(doc)
+                    return {"document_id": doc.id, "tags": tags, "response": f"Updated tags for '{doc.title}': " + (", ".join(tag["name"] for tag in tags) or "none"), "exit_code": 0}
+                if action == "create_tag":
+                    tag = create_tag(db, owner, args.get("name"))
+                else:
+                    tag_id = args.get("tag_id")
+                    if not tag_id:
+                        return {"error": f"{action} requires tag_id (use list_tags)", "exit_code": 1}
+                    if action == "delete_tag":
+                        delete_tag(db, owner, tag_id)
+                        db.commit()
+                        return {"response": "Tag deleted; its documents were kept.", "exit_code": 0}
+                    tag = rename_tag(db, owner, tag_id, args.get("name"))
+                db.commit()
+                return {"tag": {"id": tag.id, "name": tag.name}, "response": f"Saved tag: {tag.name} (id={tag.id})", "exit_code": 0}
+
             if action in ("list_folders", "create_folder", "move"):
                 from src.document_library import create_folder, list_folders, move_document
                 if not owner:
@@ -869,6 +912,13 @@ class ManageDocumentTool:
                     from src.document_library import validate_folder_path
                     from sqlalchemy import func
                     q = q.filter(func.coalesce(Document.folder, "") == validate_folder_path(args["folder"]))
+                if "tag_ids" in args:
+                    from core.database import DocumentTag
+                    tag_ids = args["tag_ids"]
+                    if not isinstance(tag_ids, list) or any(not isinstance(tag_id, str) for tag_id in tag_ids) or len(tag_ids) > 100:
+                        return {"error": "tag_ids must be an array of up to 100 tag IDs", "exit_code": 1}
+                    for tag_id in set(tag_ids):
+                        q = q.filter(Document.tags.any(DocumentTag.id == tag_id))
                 docs = q.order_by(Document.updated_at.desc()).limit(args.get("limit", 50)).all()
                 if not docs:
                     if show_deleted:
@@ -883,10 +933,13 @@ class ManageDocumentTool:
                     lang = d.language or "text"
                     ts = getattr(d, 'updated_at', None) or getattr(d, 'created_at', None)
                     marker = " ← most recent" if i == 0 else ""
+                    tags = [{"id": tag.id, "name": tag.name} for tag in getattr(d, "tags", [])]
+                    if tags:
+                        marker += "; tags: " + ", ".join(tag["name"] for tag in tags)
                     lines.append(
                         f"- [{d.title}](#document-{d.id}) — {lang}, {size} chars, updated {_rel(ts)}{marker}"
                     )
-                    items.append({"id": d.id, "title": d.title, "language": lang, "size": size, "folder": getattr(d, "folder", "") or ""})
+                    items.append({"id": d.id, "title": d.title, "language": lang, "size": size, "folder": getattr(d, "folder", "") or "", "tags": tags})
                 if show_deleted:
                     header = f"Found {len(docs)} deleted document(s), sorted most-recently-deleted first. Use action='restore' with the id to bring one back:"
                 else:
@@ -927,6 +980,7 @@ class ManageDocumentTool:
                         "title": doc.title,
                         "language": doc.language,
                         "folder": getattr(doc, "folder", "") or "",
+                        "tags": [{"id": tag.id, "name": tag.name} for tag in getattr(doc, "tags", [])],
                         "size": len(body),
                         "content": preview,
                         "truncated": truncated,

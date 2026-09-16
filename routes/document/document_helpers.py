@@ -8,12 +8,13 @@ import re
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import Document, DocumentVersion
 from core.database import Session as DbSession
 from src.auth_helpers import _auth_disabled
 from src.upload_handler import UploadHandler
+from src.document_library import document_tags
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class DocumentCreate(BaseModel):
     language: Optional[str] = None
     content: str = ""
     folder: str = ""
+    tag_ids: list[str] = Field(default_factory=list)
 
 class DocumentUpdate(BaseModel):
     content: str
@@ -37,6 +39,11 @@ class DocumentPatch(BaseModel):
     language: Optional[str] = None
     session_id: Optional[str] = None  # link/unlink document to a session
     folder: Optional[str] = None
+    tag_ids: Optional[list[str]] = None
+
+
+class TagName(BaseModel):
+    name: str
 
 
 # ---- Helpers ----
@@ -48,6 +55,7 @@ def _doc_to_dict(doc: Document) -> Dict[str, Any]:
         "title": doc.title,
         "language": doc.language,
         "folder": getattr(doc, "folder", "") or "",
+        "tags": document_tags(doc),
         "current_content": doc.current_content,
         "version_count": doc.version_count,
         "is_active": doc.is_active,

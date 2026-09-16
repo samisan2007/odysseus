@@ -1,10 +1,13 @@
-"""Owner-scoped nested library folders."""
+"""Owner-scoped library folders and reusable document tags."""
 
 import re
+import uuid
 
 from fastapi import HTTPException
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
-from core.database import Document, DocumentFolder
+from core.database import Document, DocumentFolder, DocumentTag, document_tag_links
 
 
 def validate_folder_path(path: str) -> str:
@@ -77,3 +80,111 @@ def move_document(db, user, document_id: str, folder: str) -> Document:
     _verify_doc_owner(db, doc, user)
     doc.folder = create_folder(db, user, folder)
     return doc
+
+
+def _tag_query(db, user):
+    from src.auth_helpers import _auth_disabled
+
+    if user is None and not _auth_disabled():
+        raise HTTPException(403, "Authentication required")
+    return db.query(DocumentTag).filter(DocumentTag.owner == (user or ""))
+
+
+def _tag_name(name):
+    if not isinstance(name, str):
+        raise HTTPException(400, "Tag name must be text")
+    name = " ".join(name.split())
+    if not 1 <= len(name) <= 64 or re.search(r"[\x00-\x1f\x7f]", name):
+        raise HTTPException(400, "Tag names must contain 1 to 64 characters without control characters")
+    return name
+
+
+def list_tags(db, user) -> list[dict]:
+    """List reusable tags and their active, unarchived document counts."""
+    from routes.document_helpers import _owner_session_filter
+
+    counts = _owner_session_filter(
+        db.query(document_tag_links.c.tag_id, func.count(Document.id).label("document_count"))
+        .join(Document, Document.id == document_tag_links.c.document_id)
+        .filter(Document.is_active.is_(True), or_(Document.archived.is_(False), Document.archived.is_(None))),
+        user,
+    ).group_by(document_tag_links.c.tag_id).subquery()
+    rows = (_tag_query(db, user)
+            .outerjoin(counts, counts.c.tag_id == DocumentTag.id)
+            .add_columns(func.coalesce(counts.c.document_count, 0))
+            .order_by(DocumentTag.name_key, DocumentTag.id).all())
+    return [{"id": tag.id, "name": tag.name, "document_count": count} for tag, count in rows]
+
+
+def create_tag(db, user, name) -> DocumentTag:
+    """Reuse case-insensitive names. The caller commits the transaction."""
+    name = _tag_name(name)
+    query = _tag_query(db, user).filter(DocumentTag.name_key == name.casefold())
+    existing = query.first()
+    if existing:
+        return existing
+    tag = DocumentTag(id=str(uuid.uuid4()), owner=user or "", name=name, name_key=name.casefold())
+    try:
+        with db.begin_nested():
+            db.add(tag)
+            db.flush()
+    except IntegrityError:
+        # Concurrent creators still return the same owner-scoped label.
+        existing = query.first()
+        if existing:
+            return existing
+        raise
+    return tag
+
+
+def _get_tag(db, user, tag_id) -> DocumentTag:
+    tag = _tag_query(db, user).filter(DocumentTag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(404, "Tag not found")
+    return tag
+
+
+def rename_tag(db, user, tag_id, name) -> DocumentTag:
+    tag = _get_tag(db, user, tag_id)
+    name = _tag_name(name)
+    duplicate = (_tag_query(db, user).filter(
+        DocumentTag.name_key == name.casefold(), DocumentTag.id != tag.id,
+    ).first())
+    if duplicate:
+        raise HTTPException(409, "A tag with that name already exists")
+    try:
+        with db.begin_nested():
+            tag.name, tag.name_key = name, name.casefold()
+            db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(409, "A tag with that name already exists") from exc
+    return tag
+
+
+def delete_tag(db, user, tag_id) -> None:
+    db.delete(_get_tag(db, user, tag_id))
+    db.flush()
+
+
+def resolve_tag_ids(db, user, tag_ids) -> list[DocumentTag]:
+    """Validate the entire selection before changing any assignment."""
+    if not isinstance(tag_ids, list) or any(not isinstance(tag_id, str) or not tag_id for tag_id in tag_ids):
+        raise HTTPException(400, "tag_ids must be a list of tag IDs")
+    ids = set(tag_ids)
+    tags = _tag_query(db, user).filter(DocumentTag.id.in_(ids)).all() if ids else []
+    if len(tags) != len(ids):
+        raise HTTPException(404, "One or more tags were not found")
+    return tags
+
+
+def set_document_tags(db, user, doc, tag_ids) -> None:
+    from routes.document_helpers import _verify_doc_owner
+
+    _verify_doc_owner(db, doc, user or None)
+    doc.tags = resolve_tag_ids(db, user, tag_ids)
+
+
+def document_tags(doc) -> list[dict]:
+    return [{"id": tag.id, "name": tag.name} for tag in sorted(
+        getattr(doc, "tags", None) or [], key=lambda tag: (tag.name.casefold(), tag.id),
+    )]

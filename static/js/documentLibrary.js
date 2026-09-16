@@ -64,6 +64,8 @@ let _librarySearch = '';
 let _librarySearchDebounce = null;
 let _libraryFolder = null; // null = all documents; '' = library root
 let _libraryFolders = [];
+let _libraryTags = [];
+let _libraryActiveTagIds = new Set();
 let _libraryFetchVersion = 0;
 
 // Highlight the active search terms inside a plain string. Escapes first,
@@ -409,6 +411,218 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     }
   }
 
+  function libraryRenderTagFilters() {
+    const wrap = document.getElementById('doclib-tag-filters');
+    if (!wrap) return;
+    wrap.replaceChildren();
+    const all = document.createElement('button');
+    all.className = 'memory-cat-chip' + (_libraryActiveTagIds.size ? '' : ' active');
+    all.type = 'button';
+    all.textContent = 'All tags';
+    all.setAttribute('aria-pressed', String(!_libraryActiveTagIds.size));
+    all.addEventListener('click', () => {
+      _libraryActiveTagIds.clear();
+      libraryRenderTagFilters();
+      libraryFetch(false);
+    });
+    wrap.appendChild(all);
+    for (const tag of _libraryTags) {
+      const active = _libraryActiveTagIds.has(String(tag.id));
+      const chip = document.createElement('button');
+      chip.className = 'memory-cat-chip' + (active ? ' active' : '');
+      chip.type = 'button';
+      chip.textContent = `${tag.name} (${tag.document_count || 0})`;
+      chip.setAttribute('aria-pressed', String(active));
+      chip.title = active ? 'Remove tag filter' : 'Require this tag';
+      chip.addEventListener('click', () => {
+        const id = String(tag.id);
+        if (_libraryActiveTagIds.has(id)) _libraryActiveTagIds.delete(id);
+        else _libraryActiveTagIds.add(id);
+        libraryRenderTagFilters();
+        libraryFetch(false);
+      });
+      wrap.appendChild(chip);
+    }
+  }
+
+  function libraryRenderTagsManager() {
+    const list = document.getElementById('doclib-tags-list');
+    if (!list) return;
+    list.replaceChildren();
+    if (!_libraryTags.length) {
+      const empty = document.createElement('div');
+      empty.className = 'doclib-empty';
+      empty.textContent = 'No tags yet.';
+      list.appendChild(empty);
+      return;
+    }
+    for (const tag of _libraryTags) {
+      const row = document.createElement('div');
+      row.className = 'memory-item';
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+      const name = document.createElement('span');
+      name.className = 'memory-item-title';
+      name.style.flex = '1';
+      name.textContent = tag.name;
+      const count = document.createElement('span');
+      count.className = 'memory-count';
+      count.textContent = `${tag.document_count || 0} document${tag.document_count === 1 ? '' : 's'}`;
+      const rename = document.createElement('button');
+      rename.className = 'memory-toolbar-btn';
+      rename.type = 'button';
+      rename.textContent = 'Rename';
+      rename.addEventListener('click', () => libraryRenameTag(tag));
+      const remove = document.createElement('button');
+      remove.className = 'memory-toolbar-btn danger';
+      remove.type = 'button';
+      remove.textContent = 'Delete';
+      remove.title = 'Delete this tag; documents are kept';
+      remove.addEventListener('click', () => libraryDeleteTag(tag));
+      row.append(name, count, rename, remove);
+      list.appendChild(row);
+    }
+  }
+
+  async function libraryFetchTags() {
+    try {
+      const data = await libraryReadResponse(await fetch(`${API_BASE}/api/documents/tags`, {
+        credentials: 'same-origin',
+      }));
+      _libraryTags = (data.tags || []).sort((a, b) => a.name.localeCompare(b.name));
+      const valid = new Set(_libraryTags.map(tag => String(tag.id)));
+      _libraryActiveTagIds = new Set([..._libraryActiveTagIds].filter(id => valid.has(id)));
+      libraryRenderTagFilters();
+      libraryRenderTagsManager();
+    } catch (err) {
+      uiModule.showError('Failed to load tags: ' + err.message);
+    }
+  }
+
+  async function libraryCreateTag() {
+    const name = await uiModule.styledPrompt('Create a reusable document tag.', {
+      title: 'New tag', placeholder: 'Tag name', confirmText: 'Create', maxLength: 64,
+    });
+    if (!name) return;
+    try {
+      await libraryReadResponse(await fetch(`${API_BASE}/api/documents/tags`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }));
+      await libraryFetchTags();
+    } catch (err) {
+      uiModule.showError('Failed to create tag: ' + err.message);
+    }
+  }
+
+  async function libraryRenameTag(tag) {
+    const name = await uiModule.styledPrompt('Rename this tag everywhere it is used.', {
+      title: 'Rename tag', defaultValue: tag.name, placeholder: 'Tag name', confirmText: 'Rename', maxLength: 64,
+    });
+    if (!name || name === tag.name) return;
+    try {
+      await libraryReadResponse(await fetch(`${API_BASE}/api/documents/tags/${encodeURIComponent(tag.id)}`, {
+        method: 'PATCH', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }));
+      await libraryFetchTags();
+      await libraryFetch(false);
+    } catch (err) {
+      uiModule.showError('Failed to rename tag: ' + err.message);
+    }
+  }
+
+  async function libraryDeleteTag(tag) {
+    const message = `Delete the tag "${tag.name}"? Documents using it will be kept.`;
+    const ok = uiModule.styledConfirm
+      ? await uiModule.styledConfirm(message, { confirmText: 'Delete tag', danger: true })
+      : confirm(message);
+    if (!ok) return;
+    try {
+      await libraryReadResponse(await fetch(`${API_BASE}/api/documents/tags/${encodeURIComponent(tag.id)}`, {
+        method: 'DELETE', credentials: 'same-origin',
+      }));
+      _libraryActiveTagIds.delete(String(tag.id));
+      await libraryFetchTags();
+      await libraryFetch(false);
+      uiModule.showToast('Tag deleted; documents kept');
+    } catch (err) {
+      uiModule.showError('Failed to delete tag: ' + err.message);
+    }
+  }
+
+  function libraryPickTags(title, initialIds = []) {
+    if (!_libraryTags.length) {
+      uiModule.showToast('Create a tag in the Tags tab first');
+      return Promise.resolve(null);
+    }
+    return new Promise(resolve => {
+      const initial = new Set(initialIds.map(String));
+      const modal = document.createElement('div');
+      modal.className = 'modal';
+      modal.id = 'doclib-tag-picker';
+      modal.innerHTML = '<div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="doclib-tag-picker-title" style="width:min(420px,90vw);background:var(--bg);"><div class="modal-header"><h4 id="doclib-tag-picker-title"></h4></div><form class="modal-body" style="display:flex;flex-direction:column;gap:10px;"><div data-tag-options style="display:flex;flex-direction:column;gap:6px;max-height:45vh;overflow:auto;"></div><div style="display:flex;justify-content:flex-end;gap:6px;"><button type="button" class="memory-toolbar-btn" data-cancel>Cancel</button><button type="submit" class="memory-toolbar-btn">Apply</button></div></form></div>';
+      modal.querySelector('#doclib-tag-picker-title').textContent = title;
+      const options = modal.querySelector('[data-tag-options]');
+      for (const tag of _libraryTags) {
+        const label = document.createElement('label');
+        label.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = String(tag.id);
+        input.checked = initial.has(String(tag.id));
+        const text = document.createElement('span');
+        text.textContent = `${tag.name} (${tag.document_count || 0})`;
+        label.append(input, text);
+        options.appendChild(label);
+      }
+      const onKey = event => { if (event.key === 'Escape') finish(null); };
+      const finish = value => {
+        document.removeEventListener('keydown', onKey);
+        modal.remove();
+        resolve(value);
+      };
+      modal.querySelector('[data-cancel]').addEventListener('click', () => finish(null));
+      modal.addEventListener('click', event => { if (event.target === modal) finish(null); });
+      modal.querySelector('form').addEventListener('submit', event => {
+        event.preventDefault();
+        finish([...options.querySelectorAll('input:checked')].map(input => input.value));
+      });
+      document.body.appendChild(modal);
+      document.addEventListener('keydown', onKey);
+      options.querySelector('input')?.focus();
+    });
+  }
+
+  async function libraryAssignTags(ids, addOnly = false) {
+    const first = _libraryDocs.find(doc => String(doc.id) === String(ids[0]));
+    const selected = await libraryPickTags(addOnly ? 'Add tags' : 'Document tags',
+      addOnly ? [] : (first?.tags || []).map(tag => tag.id));
+    if (selected === null || (addOnly && !selected.length)) return;
+    let done = 0;
+    let failed = 0;
+    for (const id of ids) {
+      const doc = _libraryDocs.find(item => String(item.id) === String(id));
+      const existing = (doc?.tags || []).map(tag => String(tag.id));
+      const tagIds = addOnly ? [...new Set([...existing, ...selected])] : selected;
+      try {
+        await libraryReadResponse(await fetch(`${API_BASE}/api/document/${id}`, {
+          method: 'PATCH', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag_ids: tagIds }),
+        }));
+        done++;
+      } catch { failed++; }
+    }
+    if (addOnly && _librarySelectMode) libraryExitSelectMode();
+    await libraryFetchTags();
+    await libraryFetch(false);
+    const message = addOnly ? `Tagged ${done} document${done === 1 ? '' : 's'}` : 'Tags updated';
+    if (failed) uiModule.showError(`${message}; ${failed} failed`);
+    else uiModule.showToast(message);
+  }
+
   async function libraryFetch(append) {
     const requestVersion = ++_libraryFetchVersion;
     if (!append) _libraryOffset = 0;
@@ -424,6 +638,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     if (_libraryFolder !== null) params.set('folder', _libraryFolder);
     if (_librarySearch) params.set('search', _librarySearch);
     if (_libraryActiveLanguage) params.set('language', _libraryActiveLanguage);
+    for (const tagId of _libraryActiveTagIds) params.append('tag_id', tagId);
     if (_libraryDeletedView) params.set('deleted', 'true');
     else if (_libraryArchivedView) params.set('archived', 'true');
 
@@ -456,7 +671,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     const el = document.getElementById('doclib-stats');
     if (!el) return;
     const totalAll = Object.values(_libraryLanguages).reduce((a, b) => a + b, 0);
-    if (_librarySearch || _libraryActiveLanguage) {
+    if (_librarySearch || _libraryActiveLanguage || _libraryActiveTagIds.size) {
       el.textContent = `${_libraryTotal} of ${totalAll} document${totalAll !== 1 ? 's' : ''}`;
     } else {
       el.textContent = `${totalAll} document${totalAll !== 1 ? 's' : ''}`;
@@ -536,7 +751,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     if (grid.parentElement) grid.parentElement.querySelectorAll(':scope > .doclib-inline-load-more').forEach(b => b.remove());
 
     if (_libraryDocs.length === 0) {
-      if (_librarySearch || _libraryActiveLanguage) {
+      if (_librarySearch || _libraryActiveLanguage || _libraryActiveTagIds.size) {
         grid.innerHTML = '<div class="doclib-empty">No documents match your search.</div>';
       } else if (_libraryDeletedView) {
         grid.innerHTML = '<div class="doclib-empty">Trash is empty.</div>';
@@ -691,6 +906,19 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     pieces.push(`<span>${_esc(libraryRelativeTime(doc.updated_at))}</span>`);
     meta.innerHTML = pieces.join('<span style="opacity:0.5;">\u00b7</span>');
     content.appendChild(meta);
+    if (Array.isArray(doc.tags) && doc.tags.length) {
+      const tags = document.createElement('div');
+      tags.className = 'doclib-tag-list';
+      tags.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-top:5px;';
+      for (const tag of doc.tags) {
+        const chip = document.createElement('span');
+        chip.className = 'memory-cat-chip';
+        chip.style.cssText = 'font-size:9px;padding:1px 6px;pointer-events:none;';
+        chip.textContent = tag.name;
+        tags.appendChild(chip);
+      }
+      content.appendChild(tags);
+    }
     card.appendChild(content);
 
     // Header element (kept for expand/preview compatibility)
@@ -717,6 +945,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
         const items = [];
         if (doc.session_id) items.push({ label: 'Open', action: () => libraryOpenInSession(doc) });
         items.push({ label: 'Clone', action: () => libraryImportDocument(doc) });
+        if (!_libraryDeletedView) items.push({ label: 'Tags', action: () => libraryAssignTags([doc.id]) });
         if (!_libraryDeletedView) items.push({ label: 'Move to folder', action: () => libraryMoveDocuments([doc.id]) });
         _showLibDropdown(menuBtn, items, { onSelect: () => {
           libraryEnterSelectMode();
@@ -806,6 +1035,13 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     dropdown.appendChild(cloneItem);
 
     if (!_libraryDeletedView) {
+      const tagItem = document.createElement('button');
+      tagItem.className = 'dropdown-item-compact';
+      tagItem.style.cssText = 'background:none;border:none;width:100%;';
+      tagItem.textContent = 'Tags';
+      tagItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryAssignTags([doc.id]); });
+      dropdown.appendChild(tagItem);
+
       const moveItem = document.createElement('button');
       moveItem.className = 'dropdown-item-compact';
       moveItem.style.cssText = 'background:none;border:none;width:100%;';
@@ -1229,6 +1465,9 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
           language: src.language || doc.language || 'markdown',
           content: src.current_content || '',
           folder,
+          tag_ids: _libraryActiveTagIds.size
+            ? [..._libraryActiveTagIds]
+            : (src.tags || doc.tags || []).map(tag => tag.id),
         }),
       });
       if (!res.ok) throw new Error('Failed to create document');
@@ -1611,6 +1850,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
   /** Import files from disk into the document library */
   async function libraryImportFiles(fileList) {
     const folder = _libraryFolder || '';
+    const tagIds = [..._libraryActiveTagIds];
     const EXT_TO_LANG = {
       '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
       '.html': 'html', '.htm': 'html', '.css': 'css', '.md': 'markdown',
@@ -1660,6 +1900,14 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
             try { const _j = await res.json(); _e = _j.detail || _j.error || _e; } catch {}
             throw new Error('PDF import failed: ' + _e);
           }
+          const importedDoc = await res.json().catch(() => null);
+          if (tagIds.length && importedDoc?.id) {
+            await libraryReadResponse(await fetch(`${API_BASE}/api/document/${importedDoc.id}`, {
+              method: 'PATCH', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tag_ids: tagIds }),
+            }));
+          }
           imported++;
           continue;
         }
@@ -1677,7 +1925,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
             const res = await fetch(`${API_BASE}/api/document`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title: sheetTitle, language: 'csv', content: csv, folder }),
+              body: JSON.stringify({ title: sheetTitle, language: 'csv', content: csv, folder, tag_ids: tagIds }),
             });
             if (!res.ok) throw new Error('Server error');
           }
@@ -1687,7 +1935,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
           const res = await fetch(`${API_BASE}/api/document`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: baseTitle, language, content, folder }),
+            body: JSON.stringify({ title: baseTitle, language, content, folder, tag_ids: tagIds }),
           });
           if (!res.ok) throw new Error('Server error');
           imported++;
@@ -1725,6 +1973,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     _librarySelectedIds.clear();
     _librarySearch = '';
     _libraryActiveLanguage = null;
+    _libraryActiveTagIds = new Set();
     _librarySort = 'recent';
     _libraryOffset = 0;
     _libraryDocs = [];
@@ -1746,6 +1995,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
         <div class="lib-tabs" id="doclib-lib-tabs" style="padding:0 10px;">
           <button class="lib-tab" data-doclib-tab="chats"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chats</button>
           <button class="lib-tab active" data-doclib-tab="documents"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>Documents</button>
+          <button class="lib-tab" data-doclib-tab="tags"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M20.59 13.41L11 3.83V3H4v7h.83l9.58 9.59a2 2 0 0 0 2.82 0l3.36-3.36a2 2 0 0 0 0-2.82z"/><circle cx="7.5" cy="6.5" r=".5" fill="currentColor"/></svg>Tags</button>
           <button class="lib-tab" data-doclib-tab="research"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px;margin-right:3px;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>Research</button>
           <button class="lib-tab" data-doclib-tab="archive"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>Archive</button>
         </div>
@@ -1832,6 +2082,14 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
             </div>
             <div id="doclib-research-grid" class="doclib-grid"></div>
           </div>
+          <div id="doclib-panel-tags" data-doclib-panel="tags" class="admin-card" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+              <h2 style="margin:0;padding:0;line-height:1;">Tags</h2>
+              <button class="memory-toolbar-btn" id="doclib-new-tag" type="button" style="margin-left:auto;">New tag</button>
+            </div>
+            <p class="memory-desc doclib-desc">Reusable labels for organizing documents. Deleting a tag keeps its documents.</p>
+            <div id="doclib-tags-list" class="doclib-grid"></div>
+          </div>
           <div data-doclib-panel="documents" class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
               <h2 style="margin:0;padding:0;line-height:1;">Documents <span id="doclib-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
@@ -1862,6 +2120,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
               <input type="text" id="doclib-search" placeholder="Search titles &amp; content\u2026" class="memory-search-input" />
               <div id="doclib-chips" class="doclib-lang-chips"></div>
             </div>
+            <div id="doclib-tag-filters" class="doclib-lang-chips" aria-label="Filter by tags" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px;"></div>
             <input type="file" id="doclib-file-input" multiple style="display:none" />
             <div id="doclib-bulk-bar" class="memory-bulk-bar hidden" style="margin-bottom:5px;">
               <label class="memory-bulk-check-all" style="position:relative;top:0px;left:1px;"><input type="checkbox" id="doclib-select-all" /> All</label>
@@ -1993,6 +2252,10 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
         label: 'Documents',
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
       },
+      tags: {
+        label: 'Tags',
+        svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41L11 3.83V3H4v7h.83l9.58 9.59a2 2 0 0 0 2.82 0l3.36-3.36a2 2 0 0 0 0-2.82z"/><circle cx="7.5" cy="6.5" r=".5" fill="currentColor"/></svg>',
+      },
       research: {
         label: 'Research',
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
@@ -2024,6 +2287,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       if (tab === 'chats') _renderLibChats();
       else if (tab === 'archive') _renderLibArchive();
       else if (tab === 'research') _renderLibResearch();
+      else if (tab === 'tags') libraryFetchTags();
     }
 
     _tabBtns.forEach(btn => {
@@ -3307,6 +3571,8 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
     _switchLibTab(_activeLibTab);
 
     libraryFetchFolders();
+    libraryFetchTags();
+    document.getElementById('doclib-new-tag').addEventListener('click', libraryCreateTag);
     document.getElementById('doclib-folder').addEventListener('change', (e) => {
       _libraryFolder = e.target.value === '*' ? null : e.target.value;
       if (_librarySelectMode) libraryExitSelectMode();
@@ -3382,11 +3648,11 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       createBtn.addEventListener('click', async () => {
         try {
           if (_newDocument) {
-            await _newDocument({ folder: _libraryFolder || '' });
+            await _newDocument({ folder: _libraryFolder || '', tag_ids: [..._libraryActiveTagIds] });
           } else {
             const sessionId = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
             if (!sessionId) throw new Error('No active session');
-            await _createDocument(sessionId, { folder: _libraryFolder || '' });
+            await _createDocument(sessionId, { folder: _libraryFolder || '', tag_ids: [..._libraryActiveTagIds] });
           }
           closeLibrary();
           setTimeout(() => _openPanel(), 50);
@@ -3531,6 +3797,7 @@ let _libraryDeletedView = false;    // Documents tab showing the trash (deleted 
       // No hard-delete exists yet, so there's nothing further to delete from
       // inside the Trash view itself -- only Restore (above) makes sense there.
       if (!_libraryDeletedView) {
+        bulkItems.push({ label: 'Add tags', action: () => libraryAssignTags([..._librarySelectedIds], true) });
         bulkItems.push({ label: 'Move to folder', action: () => libraryMoveDocuments([..._librarySelectedIds]) });
         bulkItems.push({ label: 'Delete', icon: 'delete', danger: true, action: libraryBulkDelete });
       }
