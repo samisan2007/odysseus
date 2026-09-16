@@ -1895,6 +1895,11 @@ import { loadPanel } from './panels.js';
 	      }
 	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
 	      fd.append('plan_mode', isPlanMode ? 'true' : 'false');
+	      const _effortWrap = document.getElementById('reasoning-effort-wrap');
+	      const _effort = document.getElementById('reasoning-effort');
+	      if (_effortWrap && !_effortWrap.hidden && _effort && _effort.dataset.effort) {
+	        fd.append('reasoning_effort', _effort.dataset.effort);
+	      }
 	      if (!isPlanMode && _pendingApprovedPlan) {
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';

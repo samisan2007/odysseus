@@ -1000,6 +1000,7 @@ def setup_chat_routes(
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        reasoning_effort = str(form_data.get("reasoning_effort") or (body or {}).get("reasoning_effort") or "").strip().lower()
         tool_approval_id = (
             form_data.get("tool_approval_id")
             or (body or {}).get("tool_approval_id")
@@ -2593,6 +2594,10 @@ def setup_chat_routes(
         async def _safe_stream() -> AsyncGenerator[str, None]:
             """Wrapper that guarantees _active_streams cleanup even if stream_with_save
             raises before reaching a mode-specific finally block."""
+            if reasoning_effort:
+                # Runs in its own task (agent_runs / StreamingResponse), so no reset needed.
+                from src.chatgpt_subscription import REASONING_EFFORT
+                REASONING_EFFORT.set(reasoning_effort)
             try:
                 async for chunk in stream_with_save():
                     yield chunk

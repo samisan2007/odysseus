@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
 import httpx
@@ -28,6 +29,14 @@ CHATGPT_OAUTH_ISSUER = "https://auth.openai.com"
 CHATGPT_OAUTH_REDIRECT_URI = f"{CHATGPT_OAUTH_ISSUER}/deviceauth/callback"
 CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 _AUTH_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+
+# Per-run reasoning effort picked in the composer. Set once in the chat stream
+# task; the Responses payload builder reads it so it doesn't have to be
+# threaded through every agent/fallback layer.
+REASONING_EFFORT: ContextVar[Optional[str]] = ContextVar("chatgpt_reasoning_effort", default=None)
+# slug -> {"levels": [...], "default": "..."}, refreshed whenever models are fetched.
+_REASONING_LEVELS: dict[str, dict] = {}
+_REASONING_LEVELS_FETCHED_AT = 0.0
 _AUTH_REFRESH_LOCKS_GUARD = threading.Lock()
 
 
@@ -112,9 +121,21 @@ def fetch_available_models(access_token: str, timeout: float = 10.0) -> list[str
         visibility = item.get("visibility", "")
         if isinstance(visibility, str) and visibility.strip().lower() in {"hide", "hidden"}:
             continue
+        levels = [
+            (lvl.get("effort") if isinstance(lvl, dict) else lvl)
+            for lvl in (item.get("supported_reasoning_levels") or [])
+        ]
+        levels = [lvl for lvl in levels if isinstance(lvl, str) and lvl]
+        if levels:
+            _REASONING_LEVELS[slug.strip()] = {
+                "levels": levels,
+                "default": item.get("default_reasoning_level") or "",
+            }
         priority = item.get("priority")
         rank = int(priority) if isinstance(priority, (int, float)) else 10_000
         sortable.append((rank, slug.strip()))
+    global _REASONING_LEVELS_FETCHED_AT
+    _REASONING_LEVELS_FETCHED_AT = time.time()
     sortable.sort(key=lambda item: (item[0], item[1]))
     ordered: list[str] = []
     seen: set[str] = set()
@@ -123,6 +144,23 @@ def fetch_available_models(access_token: str, timeout: float = 10.0) -> list[str
             ordered.append(slug)
             seen.add(slug)
     return ordered
+
+
+def reasoning_levels(access_token: str = "", max_age: float = 600.0) -> dict[str, dict]:
+    """Known reasoning levels per model; refetches when stale and a token is given."""
+    if access_token and time.time() - _REASONING_LEVELS_FETCHED_AT > max_age:
+        fetch_available_models(access_token)
+    return dict(_REASONING_LEVELS)
+
+
+def reasoning_effort_for(model: str) -> Optional[str]:
+    """The current run's effort if this model is known to accept it."""
+    effort = REASONING_EFFORT.get()
+    # ponytail: unknown model (cache cold after restart) drops the effort
+    # rather than risking a 400; the composer refetches levels on load.
+    if effort and effort in (_REASONING_LEVELS.get(model) or {}).get("levels", []):
+        return effort
+    return None
 
 
 def _raise_for_oauth_response(response: httpx.Response, action: str) -> None:

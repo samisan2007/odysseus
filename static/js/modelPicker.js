@@ -847,6 +847,53 @@ async function _pick(m) {
   });
 }
 
+// Reasoning effort slider: levels come from the provider (ChatGPT Subscription
+// today), keyed by model slug. The chosen level is remembered per model.
+let _effortLevels = null;
+let _effortLevelsLoading = null;
+let _effortModel = null;
+function _syncEffortSlider(modelId) {
+  _effortModel = modelId;
+  const wrap = document.getElementById('reasoning-effort-wrap');
+  const input = document.getElementById('reasoning-effort');
+  const out = document.getElementById('reasoning-effort-label');
+  if (!wrap || !input || !out) return;
+  if (!_effortLevels) {
+    wrap.hidden = true;
+    if (!_effortLevelsLoading) {
+      _effortLevelsLoading = fetch(`${API_BASE}/api/chatgpt-subscription/reasoning-levels`, { credentials: 'same-origin' })
+        .then(r => (r.ok ? r.json() : {}))
+        .catch(() => ({}))
+        .then(d => { _effortLevels = (d && d.models) || {}; _syncEffortSlider(_effortModel); });
+    }
+    return;
+  }
+  const info = modelId ? _effortLevels[modelId] : null;
+  wrap.hidden = !info;
+  if (!info) { input.dataset.effort = ''; return; }
+  const levels = info.levels;
+  const show = () => {
+    input.dataset.effort = levels[+input.value] || '';
+    out.textContent = input.dataset.effort;
+  };
+  if (!input._effortWired) {
+    input._effortWired = true;
+    input.addEventListener('input', () => _syncEffortSlider(_effortModel));
+    input.addEventListener('change', () => {
+      try { localStorage.setItem('odysseus-reasoning-effort:' + _effortModel, input.dataset.effort); } catch (_) {}
+    });
+  }
+  if (input.dataset.model !== modelId) {
+    input.dataset.model = modelId;
+    input.max = String(levels.length - 1);
+    let saved = null;
+    try { saved = localStorage.getItem('odysseus-reasoning-effort:' + modelId); } catch (_) {}
+    const idx = levels.indexOf(saved || info.default);
+    input.value = String(idx >= 0 ? idx : 0);
+  }
+  show();
+}
+
 /**
  * Update the model picker label to show the current model.
  * Always visible — shows current model name or "Select model" if none.
@@ -949,6 +996,7 @@ export function updateModelPicker() {
   // The header indicator clips long names with ellipsis; show the full model
   // identifier on hover (#1982). No tooltip on the "Select model" placeholder.
   label.title = modelId || '';
+  _syncEffortSlider(modelId);
   const logo = modelId ? providerLogo(modelId) : null;
   if (logo) {
     label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ' + displayName;
