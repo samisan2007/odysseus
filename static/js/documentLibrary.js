@@ -94,6 +94,7 @@ let _librarySelectedIds = new Set();
 let _libraryImportMode = false;
 let _libScrollBound = false;   // infinite-scroll listener attached once
 let _libraryArchivedView = false;   // Documents tab showing archived docs?
+let _libraryDeletedView = false;    // Documents tab showing the trash (deleted docs)?
 
 // ---- Library animation helpers ----
 
@@ -326,7 +327,8 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     });
     if (_librarySearch) params.set('search', _librarySearch);
     if (_libraryActiveLanguage) params.set('language', _libraryActiveLanguage);
-    if (_libraryArchivedView) params.set('archived', 'true');
+    if (_libraryDeletedView) params.set('deleted', 'true');
+    else if (_libraryArchivedView) params.set('archived', 'true');
 
     try {
       const res = await fetch(`${API_BASE}/api/documents/library?${params}`);
@@ -438,6 +440,8 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     if (_libraryDocs.length === 0) {
       if (_librarySearch || _libraryActiveLanguage) {
         grid.innerHTML = '<div class="doclib-empty">No documents match your search.</div>';
+      } else if (_libraryDeletedView) {
+        grid.innerHTML = '<div class="doclib-empty">Trash is empty.</div>';
       } else {
         const _impIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin:0 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
         grid.innerHTML =
@@ -726,36 +730,45 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     });
     dropdown.appendChild(exportItem);
 
-    // Archive / Restore — soft-archive a doc out of the main list, or bring it back.
+    // Archive / Restore — soft-archive a doc out of the main list, or bring it
+    // back. In the Trash view this becomes a straight undelete instead (a
+    // deleted doc isn't "archived", and there's no separate archive state to
+    // toggle back to — it's just gone until restored).
     const _archiveIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
     const archiveItem = document.createElement('button');
     archiveItem.className = 'dropdown-item-compact';
     archiveItem.style.cssText = 'background:none;border:none;width:100%;';
-    archiveItem.innerHTML = _di(_archiveIco) + `<span>${_libraryArchivedView ? 'Restore' : 'Archive'}</span>`;
-    archiveItem.title = _libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)';
+    archiveItem.innerHTML = _di(_archiveIco) + `<span>${(_libraryDeletedView || _libraryArchivedView) ? 'Restore' : 'Archive'}</span>`;
+    archiveItem.title = _libraryDeletedView ? 'Restore from trash' : (_libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)');
     archiveItem.addEventListener('click', async (e) => {
       e.stopPropagation();
       hideCardDropdown();
-      const toArchived = !_libraryArchivedView;
+      const url = _libraryDeletedView
+        ? `${API_BASE}/api/document/${doc.id}/undelete`
+        : `${API_BASE}/api/document/${doc.id}/archive?archived=${!_libraryArchivedView}`;
+      const verb = _libraryDeletedView ? 'Restored' : (_libraryArchivedView ? 'Restored' : 'Archived');
       try {
-        const res = await fetch(`${API_BASE}/api/document/${doc.id}/archive?archived=${toArchived}`, { method: 'POST', credentials: 'same-origin' });
+        const res = await fetch(url, { method: 'POST', credentials: 'same-origin' });
         if (!res.ok) throw new Error('failed');
         // Drop it from the current view (it no longer belongs here) and refresh.
         libraryRemoveDocumentFromState(doc.id);
         libraryRenderGrid();
-        if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
-      } catch { if (uiModule) uiModule.showError('Failed to ' + (toArchived ? 'archive' : 'restore')); }
+        if (uiModule) uiModule.showToast(verb);
+      } catch { if (uiModule) uiModule.showError('Failed to ' + (verb === 'Archived' ? 'archive' : 'restore')); }
     });
     dropdown.appendChild(archiveItem);
 
-    // Delete
-    const _deleteIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-    const deleteItem = document.createElement('button');
-    deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
-    deleteItem.style.cssText = 'background:none;border:none;width:100%;';
-    deleteItem.innerHTML = _di(_deleteIco) + '<span>Delete</span>';
-    deleteItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryDeleteSingle(doc.id, card); });
-    dropdown.appendChild(deleteItem);
+    // Delete — hidden in the Trash view itself; there's no hard-delete to
+    // reach for from here, only Restore (above) to bring it back.
+    if (!_libraryDeletedView) {
+      const _deleteIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+      const deleteItem = document.createElement('button');
+      deleteItem.className = 'dropdown-item-compact dropdown-item-danger';
+      deleteItem.style.cssText = 'background:none;border:none;width:100%;';
+      deleteItem.innerHTML = _di(_deleteIco) + '<span>Delete</span>';
+      deleteItem.addEventListener('click', (e) => { e.stopPropagation(); hideCardDropdown(); libraryDeleteSingle(doc.id, card); });
+      dropdown.appendChild(deleteItem);
+    }
 
     menuWrap.appendChild(dropdown);
     actionsWrap.appendChild(menuWrap);
@@ -822,21 +835,25 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); libraryDeleteSingle(doc.id, card); });
 
     // Archive sits next to Delete on the LEFT — same lineup as the chat
-    // and research footers. Label flips to Restore inside the Archive view.
+    // and research footers. Label flips to Restore inside the Archive view,
+    // and to a straight undelete inside the Trash view.
     const archiveBtn = document.createElement('button');
     archiveBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
-    archiveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>' + (_libraryArchivedView ? 'Restore' : 'Archive');
-    archiveBtn.title = _libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)';
+    archiveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>' + ((_libraryDeletedView || _libraryArchivedView) ? 'Restore' : 'Archive');
+    archiveBtn.title = _libraryDeletedView ? 'Restore from trash' : (_libraryArchivedView ? 'Restore to active documents' : 'Archive (hide from the main list)');
     archiveBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const toArchived = !_libraryArchivedView;
+      const url = _libraryDeletedView
+        ? `${API_BASE}/api/document/${doc.id}/undelete`
+        : `${API_BASE}/api/document/${doc.id}/archive?archived=${!_libraryArchivedView}`;
+      const verb = (_libraryDeletedView || _libraryArchivedView) ? 'Restored' : 'Archived';
       try {
-        const res = await fetch(`${API_BASE}/api/document/${doc.id}/archive?archived=${toArchived}`, { method: 'POST', credentials: 'same-origin' });
+        const res = await fetch(url, { method: 'POST', credentials: 'same-origin' });
         if (!res.ok) throw new Error('failed');
         libraryRemoveDocumentFromState(doc.id);
         libraryRenderGrid();
-        if (uiModule) uiModule.showToast(toArchived ? 'Archived' : 'Restored');
-      } catch { if (uiModule) uiModule.showError('Failed to ' + (toArchived ? 'archive' : 'restore')); }
+        if (uiModule) uiModule.showToast(verb);
+      } catch { if (uiModule) uiModule.showError('Failed to ' + (verb === 'Archived' ? 'archive' : 'restore')); }
     });
 
     const leftGroup = document.createElement('div');
@@ -848,10 +865,13 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     btnRow.appendChild(openBtn);
     leftGroup.appendChild(btnRow);
     // Delete furthest LEFT, then Archive; Open/Clone group on the RIGHT.
-    // Nudge the Delete/Archive pair 8px left for alignment.
-    deleteBtn.style.cssText += ';position:relative;left:-8px;';
+    // Nudge the Delete/Archive pair 8px left for alignment. Delete itself
+    // is dropped in the Trash view -- nothing further to delete from here.
     archiveBtn.style.cssText += ';position:relative;left:-8px;';
-    expandedActions.appendChild(deleteBtn);
+    if (!_libraryDeletedView) {
+      deleteBtn.style.cssText += ';position:relative;left:-8px;';
+      expandedActions.appendChild(deleteBtn);
+    }
     expandedActions.appendChild(archiveBtn);
     expandedActions.appendChild(leftGroup);
 
@@ -1258,15 +1278,18 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const ids = [..._librarySelectedIds];
     let done = 0, failed = 0;
     for (const id of ids) {
+      const url = _libraryDeletedView
+        ? `${API_BASE}/api/document/${id}/undelete`
+        : `${API_BASE}/api/document/${id}/archive?archived=${toArchived}`;
       try {
-        const res = await fetch(`${API_BASE}/api/document/${id}/archive?archived=${toArchived}`, { method: 'POST', credentials: 'same-origin' });
+        const res = await fetch(url, { method: 'POST', credentials: 'same-origin' });
         if (res.ok) done++; else failed++;
       } catch { failed++; }
     }
     libraryExitSelectMode();
     await libraryFetch(false);
     if (uiModule) {
-      const verb = toArchived ? 'Archived' : 'Restored';
+      const verb = (_libraryDeletedView || !toArchived) ? 'Restored' : 'Archived';
       const msg = failed > 0 ? `${verb} ${done} · ${failed} failed` : `${verb} ${done} document${done !== 1 ? 's' : ''}`;
       (failed > 0 ? uiModule.showError : uiModule.showToast)(msg);
     }
@@ -1713,6 +1736,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
                 </select>
                 <button class="memory-toolbar-btn" id="doclib-select-btn" title="Select documents">Select</button>
                 <button class="memory-toolbar-btn" id="doclib-tidy-btn" title="Tidy: remove empty / junk / duplicate documents">Tidy</button>
+                <button class="memory-toolbar-btn" id="doclib-trash-btn" title="Show deleted documents"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Trash</button>
               </div>
               <input type="text" id="doclib-search" placeholder="Search titles &amp; content\u2026" class="memory-search-input" />
               <div id="doclib-chips" class="doclib-lang-chips"></div>
@@ -3247,8 +3271,28 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const archivedBtn = document.getElementById('doclib-archived-btn');
     if (archivedBtn) archivedBtn.addEventListener('click', () => {
       _libraryArchivedView = !_libraryArchivedView;
+      if (_libraryArchivedView) {
+        _libraryDeletedView = false;
+        trashBtn?.classList.remove('active');
+      }
       archivedBtn.classList.toggle('active', _libraryArchivedView);
       archivedBtn.title = _libraryArchivedView ? 'Show active documents' : 'Show archived documents';
+      if (_librarySelectMode) libraryExitSelectMode();
+      libraryFetch(false);
+    });
+
+    // Trash toggle — flip the Documents list to show deleted docs, so one can
+    // be restored from the UI directly instead of needing the model to call
+    // the restore tool (or, worse, someone hand-editing the database).
+    const trashBtn = document.getElementById('doclib-trash-btn');
+    if (trashBtn) trashBtn.addEventListener('click', () => {
+      _libraryDeletedView = !_libraryDeletedView;
+      if (_libraryDeletedView) {
+        _libraryArchivedView = false;
+        archivedBtn?.classList.remove('active');
+      }
+      trashBtn.classList.toggle('active', _libraryDeletedView);
+      trashBtn.title = _libraryDeletedView ? 'Show active documents' : 'Show deleted documents';
       if (_librarySelectMode) libraryExitSelectMode();
       libraryFetch(false);
     });
@@ -3349,12 +3393,17 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         if (uiModule) uiModule.showToast('Select documents first');
         return;
       }
-      _showLibDropdown(e.currentTarget, [
-        { label: _libraryArchivedView ? 'Restore' : 'Archive', icon: _libraryArchivedView ? 'restore' : 'archive', action: libraryBulkArchive },
+      const bulkItems = [
+        { label: (_libraryDeletedView || _libraryArchivedView) ? 'Restore' : 'Archive', icon: (_libraryDeletedView || _libraryArchivedView) ? 'restore' : 'archive', action: libraryBulkArchive },
         { label: 'Clone', icon: 'clone', action: libraryBulkClone },
         { label: 'Export', icon: 'open', action: libraryBulkExport },
-        { label: 'Delete', icon: 'delete', danger: true, action: libraryBulkDelete },
-      ], { onCancel: libraryExitSelectMode });
+      ];
+      // No hard-delete exists yet, so there's nothing further to delete from
+      // inside the Trash view itself -- only Restore (above) makes sense there.
+      if (!_libraryDeletedView) {
+        bulkItems.push({ label: 'Delete', icon: 'delete', danger: true, action: libraryBulkDelete });
+      }
+      _showLibDropdown(e.currentTarget, bulkItems, { onCancel: libraryExitSelectMode });
     });
 
     const bulkCancelBtn = document.getElementById('doclib-bulk-cancel');
